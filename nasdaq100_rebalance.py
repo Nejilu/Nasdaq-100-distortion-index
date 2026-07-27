@@ -73,6 +73,8 @@ class RebalanceResult:
     additions: tuple[str, ...]
     removals: tuple[str, ...]
     data_source: str
+    acwi_conversion_scale: float | None = None
+    acwi_calibration_count: int = 0
     notes: tuple[str, ...] = ()
 
 
@@ -630,18 +632,6 @@ def simulate_rebalance(
         "counterfactual_reference_raw"
     ].fillna(data["reference_weight_raw"])
 
-    float_ratio = data["shares_outstanding"] / data["float_shares"]
-    ratio_valid = float_ratio.replace([np.inf, -np.inf], np.nan).between(1.0, 10.0)
-    data["modified_cap_ratio"] = np.where(
-        ratio_valid,
-        float_ratio.clip(lower=1.0, upper=3.0),
-        1.0,
-    )
-    data["rebalance_input_status"] = np.where(
-        data["modified_float_mass_raw"].gt(0),
-        np.where(ratio_valid, "valid_public_inputs", "float_ratio_fallback_1x"),
-        "missing_modified_cap_mass",
-    )
     calibration = data.loc[
         data["is_current"]
         & data["actual_weight"].gt(0)
@@ -668,13 +658,78 @@ def simulate_rebalance(
             "current_weight_modified_cap_fallback"
         )
 
-    weighting_valid = data["selected"] & data["modified_float_mass_raw"].gt(0)
-    score_valid = weighting_valid & data["counterfactual_reference_raw"].gt(0)
-    data["modified_market_cap_mass"] = np.where(
-        weighting_valid,
-        data["modified_float_mass_raw"] * data["modified_cap_ratio"],
-        np.nan,
+    data["listed_total_cap"] = data["price"] * data["shares_outstanding"]
+    conversion_scale, conversion_count = derive_acwi_total_cap_conversion(data)
+    direct_acwi = (
+        data.get("reference_source", pd.Series(None, index=data.index))
+        .astype("string")
+        .eq("ishares_acwi")
+        .fillna(False)
+        & data["modified_float_mass_raw"].gt(0)
     )
+    fallback_reference = ~direct_acwi & data["modified_float_mass_raw"].gt(0)
+    yfinance_float_ratio = data["shares_outstanding"] / data["float_shares"]
+    yfinance_ratio_valid = (
+        yfinance_float_ratio.replace([np.inf, -np.inf], np.nan)
+        .between(1.0, 10.0)
+    )
+
+    data["modified_cap_ratio"] = np.nan
+    data["modified_market_cap_mass"] = np.nan
+    data["rebalance_input_status"] = "missing_modified_cap_mass"
+
+    if conversion_scale is not None:
+        converted_total_mass = data["listed_total_cap"] * conversion_scale
+        acwi_ratio = (
+            converted_total_mass / data["modified_float_mass_raw"]
+        ).clip(lower=1.0, upper=3.0)
+        direct_valid = direct_acwi & converted_total_mass.gt(0)
+        data.loc[direct_valid, "modified_cap_ratio"] = acwi_ratio.loc[direct_valid]
+        data.loc[direct_valid, "modified_market_cap_mass"] = (
+            data.loc[direct_valid, "modified_float_mass_raw"]
+            * acwi_ratio.loc[direct_valid]
+        )
+        data.loc[direct_valid, "rebalance_input_status"] = (
+            "valid_acwi_converted_tso"
+        )
+        direct_without_total = direct_acwi & ~direct_valid
+    else:
+        direct_without_total = direct_acwi
+
+    data.loc[direct_without_total, "modified_cap_ratio"] = 1.0
+    data.loc[direct_without_total, "modified_market_cap_mass"] = data.loc[
+        direct_without_total, "modified_float_mass_raw"
+    ]
+    data.loc[direct_without_total, "rebalance_input_status"] = (
+        "acwi_total_cap_conversion_unavailable_1x"
+    )
+
+    fallback_ratio = yfinance_float_ratio.clip(lower=1.0, upper=3.0).where(
+        yfinance_ratio_valid,
+        1.0,
+    )
+    data.loc[fallback_reference, "modified_cap_ratio"] = fallback_ratio.loc[
+        fallback_reference
+    ]
+    data.loc[fallback_reference, "modified_market_cap_mass"] = (
+        data.loc[fallback_reference, "modified_float_mass_raw"]
+        * fallback_ratio.loc[fallback_reference]
+    )
+    data.loc[
+        fallback_reference & yfinance_ratio_valid,
+        "rebalance_input_status",
+    ] = "valid_yfinance_float_fallback"
+    data.loc[
+        fallback_reference & ~yfinance_ratio_valid,
+        "rebalance_input_status",
+    ] = "float_ratio_fallback_1x"
+    data.loc[
+        current_mass_fallback,
+        "rebalance_input_status",
+    ] = "current_weight_modified_cap_fallback"
+
+    weighting_valid = data["selected"] & data["modified_market_cap_mass"].gt(0)
+    score_valid = weighting_valid & data["counterfactual_reference_raw"].gt(0)
     if not weighting_valid.any():
         raise ValueError("No selected security has a valid rebalance reference mass.")
 
@@ -736,11 +791,18 @@ def simulate_rebalance(
             [
                 "float_ratio_fallback_1x",
                 "current_weight_modified_cap_fallback",
+                "acwi_total_cap_conversion_unavailable_1x",
             ]
         )
         .sum()
     )
     notes = list(selection.notes)
+    if conversion_scale is not None:
+        notes.append(
+            "Direct ACWI modified caps use an ACWI/total-cap conversion scale "
+            f"of {conversion_scale:.8g}, calibrated on {conversion_count} "
+            "matched securities; yfinance floatShares is not used for them."
+        )
     if input_fallbacks:
         notes.append(
             f"{input_fallbacks} securities used a documented modified-cap fallback "
@@ -762,8 +824,47 @@ def simulate_rebalance(
         additions=selection.additions,
         removals=selection.removals,
         data_source=selection.source,
+        acwi_conversion_scale=conversion_scale,
+        acwi_calibration_count=conversion_count,
         notes=tuple(notes),
     )
+
+
+def derive_acwi_total_cap_conversion(
+    data: pd.DataFrame,
+    *,
+    quantile: float = 0.90,
+    minimum_pairs: int = 20,
+) -> tuple[float | None, int]:
+    """Estimate fund-value units per total-cap dollar from direct ACWI matches.
+
+    ACWI holding market values are proportional to free-float capitalization.
+    The upper quantile of ACWI mass / listed total capitalization estimates the
+    common conversion scale from names whose free float is close to 100%.
+    """
+    if not 0.5 <= quantile < 1.0:
+        raise ValueError("quantile must be between 0.5 and 1.0.")
+    reference_source = data.get(
+        "reference_source",
+        pd.Series(None, index=data.index),
+    ).astype("string")
+    float_mass = pd.to_numeric(
+        data.get("modified_float_mass_raw"), errors="coerce"
+    )
+    listed_total_cap = pd.to_numeric(
+        data.get("listed_total_cap"), errors="coerce"
+    )
+    valid = (
+        reference_source.eq("ishares_acwi")
+        & float_mass.gt(0)
+        & listed_total_cap.gt(0)
+    )
+    ratios = (float_mass.loc[valid] / listed_total_cap.loc[valid]).replace(
+        [np.inf, -np.inf], np.nan
+    ).dropna()
+    if len(ratios) < minimum_pairs:
+        return None, int(len(ratios))
+    return float(ratios.quantile(quantile)), int(len(ratios))
 
 
 def apply_company_capping(initial_weights: pd.Series) -> pd.Series:

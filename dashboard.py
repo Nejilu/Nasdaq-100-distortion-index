@@ -381,6 +381,12 @@ def _percent(value: float | None) -> str:
     return "n/a" if value is None or pd.isna(value) else f"{value:.2%}"
 
 
+def _number(value: object, significant_digits: int = 4) -> str:
+    if value is None or pd.isna(value):
+        return "n/a"
+    return f"{float(value):.{significant_digits}g}"
+
+
 def _display_date(value: object) -> str:
     if value is None or str(value).strip() == "":
         return "not published"
@@ -574,7 +580,7 @@ def _render_score_strip(
             </div>
           </div>
           <div class="ndx-rebalance-score">
-            <div class="ndx-eyebrow">If rebalanced today</div>
+            <div class="ndx-eyebrow">If quarterly review ran today</div>
             <div class="ndx-rebalance-value">{rebalance_value}</div>
             <div class="ndx-rebalance-change">{score_change_label}</div>
           </div>
@@ -637,10 +643,16 @@ def _render_rebalance_controls(snapshot: dict[str, object]) -> bool:
                 applies Nasdaq listing tier, non-financial classification, security
                 type, three-month liquidity and seasoning or fast-entry rules.
 
-                Initial weights use modified market capitalization:
-                `free-float mass x min(total shares / float shares, 3)`.
-                Company concentration is then adjusted under the official 24%/20%
-                and 4.5%-48%/40% rules.
+                For direct ACWI matches, initial weights use:
+                `min(converted listed total cap, 3 x ACWI free-float mass)`.
+                The conversion is calibrated from ACWI market values and listed
+                total capitalizations. Yahoo `floatShares` is used only when ACWI
+                cannot provide a direct reference.
+
+                This quarterly simulation applies the company-level 24%/20% rule
+                and the 4.5%-48%/40% cohort rule. The **38.5% rule does not apply
+                here**: it is the annual December security-level rule for the top
+                five securities when their combined weight reaches 40%.
                 """
             )
             additions = _parse_json_list(snapshot.get("rebalance_additions"))
@@ -650,6 +662,8 @@ def _render_rebalance_controls(snapshot: dict[str, object]) -> bool:
                 - **Reference date:** {snapshot.get("rebalance_reference_date") or "n/a"}
                 - **Coverage:** {_percent(snapshot.get("rebalance_coverage_ratio"))}
                 - **Method:** `{snapshot.get("rebalance_method") or "n/a"}`
+                - **ACWI conversion scale:** {_number(snapshot.get("rebalance_acwi_conversion_scale"), 8)}
+                - **ACWI calibration names:** {snapshot.get("rebalance_acwi_calibration_count") or 0}
                 - **Additions:** {", ".join(additions) or "none"}
                 - **Removals:** {", ".join(removals) or "none"}
                 """

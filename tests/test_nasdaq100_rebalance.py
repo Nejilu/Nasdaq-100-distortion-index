@@ -6,6 +6,7 @@ from nasdaq100_rebalance import (
     SelectionResult,
     apply_annual_security_capping,
     apply_company_capping,
+    derive_acwi_total_cap_conversion,
     select_annual_companies,
     select_quarterly_companies,
     simulate_rebalance,
@@ -20,10 +21,12 @@ def test_company_capping_applies_both_2026_concentration_stages():
 
     result = apply_company_capping(initial)
     large = result.loc[result > 0.045]
+    triggered_cohort = initial.index[initial > 0.045]
 
     assert math.isclose(result.sum(), 1.0)
     assert result.max() <= 0.20 + 1e-10
     assert large.sum() <= 0.40 + 1e-10
+    assert math.isclose(result.loc[triggered_cohort].sum(), 0.40)
     assert list(result.sort_values(ascending=False).index) == list(
         initial.sort_values(ascending=False).index
     )
@@ -154,3 +157,70 @@ def test_rebalance_uses_modified_cap_ratio_and_calculates_new_wdi():
     assert components.loc["A", "modified_cap_ratio"] == 3.0
     assert components.loc["A", "rebalance_weight"] == 0.20
     assert result.ndx_wdi > 0
+
+
+def test_direct_acwi_conversion_ignores_bad_yfinance_float_shares():
+    tickers = (
+        [f"FULL{i}" for i in range(20)]
+        + ["LOW"]
+        + [f"SMALL{i}" for i in range(80)]
+    )
+    holdings = pd.DataFrame(
+        {
+            "ticker": tickers,
+            "company_name": tickers,
+            "actual_weight": [1.0 / len(tickers)] * len(tickers),
+        }
+    )
+    securities = pd.DataFrame(
+        {
+            "ticker": tickers,
+            "company_name": tickers,
+            "company_id": tickers,
+            "security_type": ["Ordinary share"] * len(tickers),
+            "is_current": [True] * len(tickers),
+            "selected": [True] * len(tickers),
+        }
+    )
+    selection = SelectionResult(
+        securities=securities,
+        selected_tickers=tuple(tickers),
+        selected_company_ids=tuple(tickers),
+        additions=(),
+        removals=(),
+        status="test",
+        source="test",
+        as_of="2026-07-27",
+        eligible_company_count=len(tickers),
+    )
+    reference = pd.DataFrame(
+        {
+            "ticker": tickers,
+            "reference_source": ["ishares_acwi"] * len(tickers),
+            "reference_weight_raw": [10.0] * 20 + [1.0] * 81,
+            "modified_float_mass_raw": [10.0] * 20 + [1.0] * 81,
+            "counterfactual_reference_raw": [10.0] * 20 + [1.0] * 81,
+            "price": [1.0] * len(tickers),
+            "shares_outstanding": [1_000.0] * 21 + [100.0] * 80,
+            # These values are deliberately impossible and must not affect
+            # direct-ACWI modified capitalization.
+            "float_shares": [1.0] * 20 + [1_000_000.0] + [1.0] * 80,
+        }
+    )
+
+    conversion_data = reference.assign(
+        listed_total_cap=reference["price"] * reference["shares_outstanding"]
+    )
+    scale, count = derive_acwi_total_cap_conversion(conversion_data)
+    result = simulate_rebalance(holdings, reference, selection)
+    components = result.components.set_index("ticker")
+
+    assert math.isclose(scale or 0.0, 0.01)
+    assert count == 101
+    assert math.isclose(result.acwi_conversion_scale or 0.0, 0.01)
+    assert result.acwi_calibration_count == 101
+    assert components.loc["FULL0", "modified_cap_ratio"] == 1.0
+    assert components.loc["LOW", "modified_cap_ratio"] == 3.0
+    assert set(components["rebalance_input_status"]) == {
+        "valid_acwi_converted_tso"
+    }

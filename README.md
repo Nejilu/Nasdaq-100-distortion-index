@@ -98,14 +98,25 @@ The daily pipeline:
 4. Calculates each security's modified-capitalization mass:
 
    ```text
-   modified_cap_mass = free_float_mass x min(total_shares / float_shares, 3)
+   acwi_conversion_scale =
+       90th percentile(ACWI_float_mass / listed_total_cap)
+
+   converted_total_mass = listed_total_cap x acwi_conversion_scale
+   modified_cap_mass = min(converted_total_mass, 3 x ACWI_float_mass)
    ```
 
-5. Aggregates securities by company and applies the current quarterly
+   The upper-quantile calibration estimates the common fund-value scale from
+   ACWI names whose free float is close to 100%. Direct ACWI matches never use
+   yfinance `floatShares`. For ADR/ADS securities or absent ACWI positions,
+   yfinance free float remains a documented fallback.
+5. Aggregates securities by company and applies the current **quarterly**
    concentration stages: a triggered weight above 24% is adjusted to 20%, then
    a triggered aggregate of companies above 4.5% is adjusted from at least 48%
    to 40%. Uncapped names share a common proportional adjustment factor and
    initial rank is preserved.
+   The 38.5% constraint is not part of this quarterly calculation. It is the
+   separate annual December security-level rule: if the five largest securities
+   total at least 40%, their aggregate is adjusted to 38.5%.
 6. Compares the resulting security weights with the selected free-float or
    total-cap reference and recalculates `NDX_WDI`.
 

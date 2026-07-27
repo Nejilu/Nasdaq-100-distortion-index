@@ -86,6 +86,12 @@ class RecomputeOutcome:
                     "rebalance_additions": list(self.rebalance.additions),
                     "rebalance_removals": list(self.rebalance.removals),
                     "rebalance_data_source": self.rebalance.data_source,
+                    "rebalance_acwi_conversion_scale": (
+                        self.rebalance.acwi_conversion_scale
+                    ),
+                    "rebalance_acwi_calibration_count": (
+                        self.rebalance.acwi_calibration_count
+                    ),
                     "rebalance_notes": list(self.rebalance.notes),
                 }
             )

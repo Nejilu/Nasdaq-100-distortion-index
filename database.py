@@ -46,6 +46,8 @@ CREATE TABLE IF NOT EXISTS snapshots (
     ,rebalance_additions TEXT
     ,rebalance_removals TEXT
     ,rebalance_data_source TEXT
+    ,rebalance_acwi_conversion_scale REAL
+    ,rebalance_acwi_calibration_count INTEGER
     ,rebalance_notes TEXT
 );
 
@@ -153,6 +155,8 @@ class SnapshotDatabase:
             "rebalance_additions": "TEXT",
             "rebalance_removals": "TEXT",
             "rebalance_data_source": "TEXT",
+            "rebalance_acwi_conversion_scale": "REAL",
+            "rebalance_acwi_calibration_count": "INTEGER",
             "rebalance_notes": "TEXT",
         }
         for column, definition in additions.items():
@@ -216,9 +220,10 @@ class SnapshotDatabase:
                     rebalance_coverage_ratio, rebalance_constituent_count,
                     rebalance_status, rebalance_method, rebalance_reference_date,
                     rebalance_additions, rebalance_removals, rebalance_data_source,
-                    rebalance_notes
+                    rebalance_acwi_conversion_scale,
+                    rebalance_acwi_calibration_count, rebalance_notes
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                          ?, ?, ?, ?, ?, ?, ?)
+                          ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     timestamp,
@@ -247,6 +252,12 @@ class SnapshotDatabase:
                     json.dumps(rebalance.additions) if rebalance else None,
                     json.dumps(rebalance.removals) if rebalance else None,
                     rebalance.data_source if rebalance else None,
+                    (
+                        _sql_value(rebalance.acwi_conversion_scale)
+                        if rebalance
+                        else None
+                    ),
+                    rebalance.acwi_calibration_count if rebalance else None,
                     json.dumps(rebalance.notes) if rebalance else None,
                 ),
             )
