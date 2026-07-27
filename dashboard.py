@@ -1110,7 +1110,21 @@ def _render_active_share_top_x(
         f"{delta_total:+.2%}",
     )
 
-    chart = selected.sort_values(ndx_column)
+    chart = selected.sort_values(ndx_column).copy()
+    ndx_color = "#e76f51"
+    spx_color = "#4c78d0"
+    chart["weight_advantage"] = (
+        chart[ndx_column] - chart["spx_weight"]
+    ).abs()
+    chart["label_anchor"] = chart[[ndx_column, "spx_weight"]].max(axis=1)
+    maximum_weight = float(chart["label_anchor"].max())
+    label_offset = max(maximum_weight * 0.018, 0.00015)
+    chart["label_x"] = chart["label_anchor"] + label_offset
+    chart["dominant_index"] = np.where(
+        chart[ndx_column].ge(chart["spx_weight"]),
+        "NDX",
+        "S&P 500",
+    )
     figure = go.Figure()
     figure.add_trace(
         go.Bar(
@@ -1118,8 +1132,8 @@ def _render_active_share_top_x(
             y=chart["ticker"],
             orientation="h",
             name="S&P 500",
-            marker={"color": "#3f7dc0", "line": {"width": 0}},
-            opacity=0.38,
+            marker={"color": spx_color, "line": {"width": 0}},
+            opacity=0.5,
             width=0.74,
             customdata=chart[[ndx_column]].to_numpy(),
             hovertemplate=(
@@ -1140,8 +1154,8 @@ def _render_active_share_top_x(
                 if rebalanced_view
                 else "Published NDX"
             ),
-            marker={"color": "#177e78", "line": {"width": 0}},
-            opacity=0.76,
+            marker={"color": ndx_color, "line": {"width": 0}},
+            opacity=0.8,
             width=0.42,
             customdata=chart[["spx_weight"]].to_numpy(),
             hovertemplate=(
@@ -1152,6 +1166,29 @@ def _render_active_share_top_x(
             ),
         )
     )
+    for dominant_index, color in [
+        ("NDX", ndx_color),
+        ("S&P 500", spx_color),
+    ]:
+        labels = chart.loc[
+            chart["dominant_index"].eq(dominant_index)
+            & chart["weight_advantage"].gt(0.00001)
+        ]
+        figure.add_trace(
+            go.Scatter(
+                x=labels["label_x"],
+                y=labels["ticker"],
+                mode="text",
+                text=labels["weight_advantage"].map(
+                    lambda value: f"+{value:.2%}"
+                ),
+                textposition="middle right",
+                textfont={"color": color, "size": 10},
+                cliponaxis=False,
+                hoverinfo="skip",
+                showlegend=False,
+            )
+        )
     figure.update_layout(
         template="plotly_dark" if IS_DARK_MODE else "plotly_white",
         height=max(380, 27 * selected_count + 100),
@@ -1174,6 +1211,7 @@ def _render_active_share_top_x(
             "tickformat": ".1%",
             "gridcolor": THEME["chart_grid"],
             "zeroline": False,
+            "range": [0, max(maximum_weight * 1.3, 0.01)],
         },
         yaxis={"title": None, "showgrid": False},
     )
