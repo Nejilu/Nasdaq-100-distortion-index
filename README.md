@@ -77,6 +77,50 @@ reallocated to move from one distribution to the other.
 The ETF holdings remain proxies for the index, and free market-data sources are
 not official or guaranteed. Local history starts with the first saved snapshot.
 
+## If rebalanced today
+
+Each live snapshot also calculates an `NDX_WDI` using the weights that the
+Nasdaq-100 would receive if a quarterly review were run on the snapshot date.
+The implementation follows the
+[Nasdaq-100 methodology effective May 1, 2026](https://indexes.nasdaqomx.com/docs/Methodology_NDX.pdf)
+and the official
+[Nasdaq index weight calculation rules](https://indexes.nasdaqomx.com/docs/Nasdaq_Index_Weight_Calculations.pdf).
+
+The daily pipeline:
+
+1. Builds the eligible universe from the official Nasdaq stock screener and
+   Nasdaq Trader symbol directory.
+2. Groups multiple share classes at company level with SEC CIK identifiers.
+3. Applies Nasdaq listing tier, non-financial, security-type, three-month ADVT,
+   seasoning, rank-125 replacement, and top-40 fast-entry rules.
+   Non-constituent ADRs are excluded unless primary-listing and listed
+   depositary-share inputs can be verified.
+4. Calculates each security's modified-capitalization mass:
+
+   ```text
+   modified_cap_mass = free_float_mass x min(total_shares / float_shares, 3)
+   ```
+
+5. Aggregates securities by company and applies the current quarterly
+   concentration stages: a triggered weight above 24% is adjusted to 20%, then
+   a triggered aggregate of companies above 4.5% is adjusted from at least 48%
+   to 40%. Uncapped names share a common proportional adjustment factor and
+   initial rank is preserved.
+6. Compares the resulting security weights with the selected free-float or
+   total-cap reference and recalculates `NDX_WDI`.
+
+The dashboard displays this score beside the live reading. Enabling **Show
+post-rebalance weights** switches the constituent rankings and main difference
+chart to simulated weights, adds signed changes versus current weights, and
+shows dedicated charts for the largest rebalance movements and for simulated
+index entries/exits with their entering or exiting weights.
+
+The weight constraints are deterministic, but the composition result is a
+public-data simulation rather than an official Nasdaq review. Nasdaq retains
+discretion and does not publish every review input. The snapshot records
+`rebalance_status`, source, coverage, additions, removals, fallbacks, and notes
+so this limitation remains visible through SQLite and the API.
+
 ## Capitalization references
 
 The two dashboard bases are analytical comparison scenarios:
@@ -91,10 +135,10 @@ The two dashboard bases are analytical comparison scenarios:
   [Nasdaq Composite](https://www.nasdaq.com/newsroom/nasdaq-composite-vs-nasdaq-100-what-investors-should-know)
   is a useful reference for this approach.
 
-The official
-[Nasdaq-100 methodology](https://indexes.nasdaq.com/docs/Methodology_NDX.pdf)
-uses modified market capitalization with float and concentration constraints.
-Neither dashboard scenario is intended to reproduce that methodology exactly.
+The live free-float and total views remain analytical reference scenarios. The
+separate **If rebalanced today** calculation applies Nasdaq's modified
+capitalization and concentration rules before comparing those simulated index
+weights with the selected reference.
 
 ## Holdings sources and fallbacks
 

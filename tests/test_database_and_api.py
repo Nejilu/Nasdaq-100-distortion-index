@@ -5,6 +5,7 @@ from fastapi.testclient import TestClient
 import snapshot_service
 from api import _database_for_path, app, get_database
 from database import SnapshotDatabase
+from nasdaq100_rebalance import fallback_current_selection
 from snapshot_service import recompute_all_snapshots, recompute_snapshot
 
 
@@ -74,6 +75,17 @@ class _LiveAcwiProvider:
         )
 
 
+class _LiveNasdaqUniverseProvider:
+    def __init__(self, **_: object) -> None:
+        pass
+
+    def get_quarterly_selection(self, holdings: pd.DataFrame):
+        return fallback_current_selection(
+            holdings,
+            reason="Deterministic test composition.",
+        )
+
+
 @pytest.fixture
 def live_sources(monkeypatch):
     monkeypatch.setattr(
@@ -86,6 +98,9 @@ def live_sources(monkeypatch):
     )
     monkeypatch.setattr(
         snapshot_service, "IsharesAcwiFloatWeightsProvider", _LiveAcwiProvider
+    )
+    monkeypatch.setattr(
+        snapshot_service, "NasdaqPublicUniverseProvider", _LiveNasdaqUniverseProvider
     )
 
 
@@ -104,8 +119,11 @@ def test_live_snapshot_roundtrip(tmp_path, live_sources):
     assert current["holdings_source"] == "test_non_ucits_live_holdings"
     assert current["market_data_source"] == "test_acwi_reference"
     assert current["reference_data_as_of"] == "2026-07-24"
+    assert current["rebalance_ndx_wdi"] is not None
+    assert current["rebalance_method"] == "quarterly_modified_market_cap_2026"
     assert len(components) == 3
     assert {row["reference_source"] for row in components} == {"ishares_acwi"}
+    assert all(row["rebalance_weight"] is not None for row in components)
 
 
 def test_minimal_api(tmp_path, monkeypatch, live_sources):
