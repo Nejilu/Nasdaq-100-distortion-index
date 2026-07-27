@@ -11,6 +11,7 @@ from typing import Any, Iterator
 
 import pandas as pd
 
+from active_share import ActiveShareResult
 from distortion_engine import DistortionResult
 from nasdaq100_rebalance import RebalanceResult
 
@@ -85,6 +86,34 @@ CREATE TABLE IF NOT EXISTS snapshot_components (
 
 CREATE INDEX IF NOT EXISTS idx_snapshots_timestamp ON snapshots(timestamp DESC);
 CREATE INDEX IF NOT EXISTS idx_components_ticker ON snapshot_components(ticker);
+
+CREATE TABLE IF NOT EXISTS active_share_snapshots (
+    snapshot_id INTEGER PRIMARY KEY,
+    active_share REAL NOT NULL,
+    rebalanced_active_share REAL,
+    status TEXT NOT NULL,
+    spx_reference_fund TEXT NOT NULL,
+    spx_holdings_source TEXT NOT NULL,
+    spx_holdings_as_of TEXT,
+    FOREIGN KEY (snapshot_id) REFERENCES snapshots(snapshot_id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS active_share_components (
+    snapshot_id INTEGER NOT NULL,
+    ticker TEXT NOT NULL,
+    company_name TEXT,
+    ndx_weight REAL NOT NULL,
+    spx_weight REAL NOT NULL,
+    weight_delta REAL NOT NULL,
+    absolute_delta REAL NOT NULL,
+    rebalanced_ndx_weight REAL,
+    rebalanced_weight_delta REAL,
+    PRIMARY KEY (snapshot_id, ticker),
+    FOREIGN KEY (snapshot_id) REFERENCES snapshots(snapshot_id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_active_share_components_ticker
+ON active_share_components(ticker);
 """
 
 
@@ -207,6 +236,7 @@ class SnapshotDatabase:
         reference_data_as_of: str | None = None,
         source_failures: str | None = None,
         rebalance: RebalanceResult | None = None,
+        active_share: ActiveShareResult | None = None,
     ) -> int:
         with self.connect() as connection:
             cursor = connection.execute(
@@ -326,6 +356,51 @@ class SnapshotDatabase:
                 """,
                 rows,
             )
+            if active_share is not None:
+                connection.execute(
+                    """
+                    INSERT INTO active_share_snapshots (
+                        snapshot_id, active_share, rebalanced_active_share,
+                        status, spx_reference_fund, spx_holdings_source,
+                        spx_holdings_as_of
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        snapshot_id,
+                        _sql_value(active_share.active_share),
+                        _sql_value(active_share.rebalanced_active_share),
+                        active_share.status,
+                        active_share.spx_reference_fund,
+                        active_share.spx_holdings_source,
+                        active_share.spx_holdings_as_of,
+                    ),
+                )
+                active_rows = [
+                    (
+                        snapshot_id,
+                        component.get("ticker"),
+                        component.get("company_name"),
+                        _sql_value(component.get("ndx_weight")),
+                        _sql_value(component.get("spx_weight")),
+                        _sql_value(component.get("weight_delta")),
+                        _sql_value(component.get("absolute_delta")),
+                        _sql_value(component.get("rebalanced_ndx_weight")),
+                        _sql_value(component.get("rebalanced_weight_delta")),
+                    )
+                    for component in active_share.components.to_dict(
+                        orient="records"
+                    )
+                ]
+                connection.executemany(
+                    """
+                    INSERT INTO active_share_components (
+                        snapshot_id, ticker, company_name, ndx_weight,
+                        spx_weight, weight_delta, absolute_delta,
+                        rebalanced_ndx_weight, rebalanced_weight_delta
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    active_rows,
+                )
             connection.commit()
         return snapshot_id
 
@@ -429,6 +504,56 @@ class SnapshotDatabase:
                 "SELECT * FROM snapshots WHERE snapshot_id = ?", (snapshot_id,)
             ).fetchone()
         return dict(row) if row else None
+
+    def get_active_share(
+        self,
+        snapshot_id: int | None = None,
+        *,
+        universe: str | None = None,
+        weighting_basis: str | None = None,
+    ) -> dict[str, Any] | None:
+        if snapshot_id is None:
+            current = self.get_current(universe, weighting_basis)
+            if current is None:
+                return None
+            snapshot_id = int(current["snapshot_id"])
+        with self.connect() as connection:
+            row = connection.execute(
+                """
+                SELECT active_share_snapshots.*, snapshots.universe,
+                       snapshots.weighting_basis, snapshots.reference_fund,
+                       snapshots.holdings_as_of AS ndx_holdings_as_of,
+                       snapshots.timestamp
+                FROM active_share_snapshots
+                JOIN snapshots USING (snapshot_id)
+                WHERE active_share_snapshots.snapshot_id = ?
+                """,
+                (snapshot_id,),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def get_active_share_components(
+        self,
+        snapshot_id: int | None = None,
+        *,
+        universe: str | None = None,
+        weighting_basis: str | None = None,
+    ) -> list[dict[str, Any]]:
+        if snapshot_id is None:
+            current = self.get_current(universe, weighting_basis)
+            if current is None:
+                return []
+            snapshot_id = int(current["snapshot_id"])
+        with self.connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT * FROM active_share_components
+                WHERE snapshot_id = ?
+                ORDER BY absolute_delta DESC, ticker ASC
+                """,
+                (snapshot_id,),
+            ).fetchall()
+        return [dict(row) for row in rows]
 
 
 def _sql_value(value: object) -> object:

@@ -36,6 +36,15 @@ DEFAULT_EQQQ_URL = (
     "https://www.invesco.com/uk/financial-products/etfs/holdings/main/holdings/0"
     "?audienceType=Investor&action=download&ticker=EQQQ"
 )
+DEFAULT_IVV_URL = (
+    "https://www.ishares.com/us/products/239726/ishares-core-sp-500-etf/"
+    "latest-holdings.csv"
+)
+DEFAULT_CSPX_URL = (
+    "https://www.ishares.com/uk/individual/en/products/253743/"
+    "ishares-core-sp-500-ucits-etf/1506575576011.ajax?"
+    "fileType=csv&fileName=CSPX_holdings&dataType=fund"
+)
 
 
 class HoldingsProvider(Protocol):

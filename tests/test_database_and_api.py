@@ -86,6 +86,23 @@ class _LiveNasdaqUniverseProvider:
         )
 
 
+class _LiveSpxHoldingsProvider:
+    def __init__(self, universe: str) -> None:
+        self.source_name = f"test_{universe}_spx_holdings"
+        self.reference_fund = "IVV" if universe == "non_ucits" else "CSPX"
+        self.holdings_as_of = "2026-07-24"
+        self.failures: tuple[str, ...] = ()
+
+    def get_holdings(self) -> pd.DataFrame:
+        return pd.DataFrame(
+            {
+                "ticker": ["A", "B", "D"],
+                "company_name": ["Alpha", "Beta", "Delta"],
+                "actual_weight": [0.20, 0.20, 0.60],
+            }
+        )
+
+
 @pytest.fixture
 def live_sources(monkeypatch):
     monkeypatch.setattr(
@@ -102,6 +119,11 @@ def live_sources(monkeypatch):
     monkeypatch.setattr(
         snapshot_service, "NasdaqPublicUniverseProvider", _LiveNasdaqUniverseProvider
     )
+    monkeypatch.setattr(
+        snapshot_service,
+        "build_spx_holdings_chain",
+        lambda universe: _LiveSpxHoldingsProvider(universe),
+    )
 
 
 def test_live_snapshot_roundtrip(tmp_path, live_sources):
@@ -111,6 +133,8 @@ def test_live_snapshot_roundtrip(tmp_path, live_sources):
 
     current = database.get_current()
     components = database.get_components()
+    active_share = database.get_active_share()
+    active_components = database.get_active_share_components()
 
     assert current is not None
     assert current["snapshot_id"] == outcome.snapshot_id
@@ -124,6 +148,10 @@ def test_live_snapshot_roundtrip(tmp_path, live_sources):
     assert len(components) == 3
     assert {row["reference_source"] for row in components} == {"ishares_acwi"}
     assert all(row["rebalance_weight"] is not None for row in components)
+    assert active_share is not None
+    assert active_share["spx_reference_fund"] == "IVV"
+    assert active_share["active_share"] > 0
+    assert {row["ticker"] for row in active_components} == {"A", "B", "C", "D"}
 
 
 def test_rebalance_failure_preserves_live_snapshot(
@@ -142,6 +170,8 @@ def test_rebalance_failure_preserves_live_snapshot(
     database = SnapshotDatabase(path)
     current = database.get_current()
     components = database.get_components()
+    active_share = database.get_active_share()
+    active_components = database.get_active_share_components()
 
     assert outcome.rebalance is None
     assert outcome.result.snapshot_status == "complete"
@@ -154,6 +184,8 @@ def test_rebalance_failure_preserves_live_snapshot(
         "No valid modified-cap inputs"
     ) in current["source_failures"]
     assert all(row["rebalance_weight"] is None for row in components)
+    assert active_share is not None
+    assert active_share["rebalanced_active_share"] is None
 
 
 def test_minimal_api(tmp_path, monkeypatch, live_sources):
@@ -181,6 +213,13 @@ def test_minimal_api(tmp_path, monkeypatch, live_sources):
     assert contributors[0]["distortion_contribution"] >= contributors[1][
         "distortion_contribution"
     ]
+    active_response = client.get(
+        "/api/active-share?universe=non_ucits&ranking=ndx_overweights&limit=2"
+    )
+    assert active_response.status_code == 200
+    active_payload = active_response.json()
+    assert active_payload["summary"]["spx_reference_fund"] == "IVV"
+    assert len(active_payload["components"]) == 2
 
     total_response = client.post(
         "/api/recompute",

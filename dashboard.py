@@ -18,13 +18,18 @@ from snapshot_service import recompute_snapshot
 
 load_dotenv()
 st.set_page_config(
-    page_title="NDX Weight Distortion Index",
+    page_title="Nasdaq-100 Analytics",
     page_icon=":material/analytics:",
     layout="wide",
 )
 
 if "dark_mode" not in st.session_state:
     st.session_state["dark_mode"] = False
+
+
+def _toggle_dark_mode() -> None:
+    st.session_state["dark_mode"] = not bool(st.session_state["dark_mode"])
+
 
 IS_DARK_MODE = bool(st.session_state["dark_mode"])
 THEME = (
@@ -307,6 +312,42 @@ dashboard_css = """
         background: var(--ndx-line);
     }
 
+    .ndx-active-strip {
+        display: grid;
+        grid-template-columns:
+            minmax(260px, 1.3fr) minmax(230px, 1.1fr)
+            repeat(2, minmax(150px, 0.72fr));
+        align-items: center;
+        margin: 0.55rem 0 0.45rem;
+        padding: 0.8rem 0;
+        border-top: 1px solid var(--ndx-line);
+        border-bottom: 1px solid var(--ndx-line);
+    }
+
+    .ndx-active-main {
+        padding-right: 1.2rem;
+    }
+
+    .ndx-active-value {
+        color: var(--ndx-ink);
+        font-size: 3rem;
+        font-weight: 680;
+        line-height: 1;
+        margin: 0.12rem 0 0.2rem;
+    }
+
+    .ndx-active-meaning {
+        padding: 0 1.1rem;
+        color: var(--ndx-muted);
+        font-size: 0.78rem;
+        line-height: 1.42;
+        border-left: 1px solid var(--ndx-line);
+    }
+
+    .ndx-active-meaning strong {
+        color: var(--ndx-ink);
+    }
+
     @media (max-width: 900px) {
         .block-container {
             padding-top: 0.9rem;
@@ -329,6 +370,22 @@ dashboard_css = """
 
         .ndx-score-strip {
             grid-template-columns: repeat(2, minmax(0, 1fr));
+        }
+
+        .ndx-active-strip {
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+        }
+
+        .ndx-active-main {
+            grid-column: 1 / -1;
+            padding-bottom: 0.8rem;
+        }
+
+        .ndx-active-meaning,
+        .ndx-active-strip .ndx-stat {
+            border-left: 0;
+            border-top: 1px solid var(--ndx-line);
+            padding: 0.65rem 0.2rem;
         }
 
         .ndx-score-main {
@@ -525,6 +582,28 @@ def _render_method_help(weighting_basis: str) -> None:
         st.caption(
             "The official Nasdaq-100 uses modified market capitalization with float "
             "and concentration constraints. Neither comparison reproduces it exactly."
+        )
+
+
+def _render_active_share_help() -> None:
+    with st.popover(
+        "Active Share method",
+        icon=":material/help:",
+        width="stretch",
+    ):
+        st.markdown(
+            """
+            **Active Share** is half the sum of absolute security-weight
+            differences across the complete union of both portfolios.
+
+            The non-UCITS comparison uses **IQQ vs IVV**. The UCITS comparison
+            uses **CNDX vs CSPX**. Published equity weights are normalized after
+            cash and derivative rows are removed.
+
+            The annual scenario replaces published NDX weights with the same
+            full reconstitution simulation used in the distortion view. S&P 500
+            weights remain unchanged.
+            """
         )
 
 
@@ -799,6 +878,363 @@ def _outside_label_axis_range(
     span = max(upper - lower, 0.01)
     padding = padding_ratio * span
     return [lower - padding, upper + padding]
+
+
+def _active_share_view_frame(
+    components: pd.DataFrame,
+    *,
+    rebalanced_view: bool,
+) -> tuple[pd.DataFrame, str, str]:
+    frame = components.copy()
+    ndx_column = (
+        "rebalanced_ndx_weight" if rebalanced_view else "ndx_weight"
+    )
+    delta_column = (
+        "rebalanced_weight_delta" if rebalanced_view else "weight_delta"
+    )
+    for column in [ndx_column, "spx_weight", delta_column]:
+        frame[column] = pd.to_numeric(frame[column], errors="coerce")
+    frame = frame.dropna(subset=[ndx_column, "spx_weight", delta_column])
+    return frame, ndx_column, delta_column
+
+
+def _render_active_share_strip(
+    summary: dict[str, object],
+    *,
+    rebalanced_view: bool,
+) -> None:
+    current_score = float(summary["active_share"])
+    rebalanced_score = summary.get("rebalanced_active_share")
+    selected_score = (
+        float(rebalanced_score)
+        if rebalanced_view
+        and rebalanced_score is not None
+        and not pd.isna(rebalanced_score)
+        else current_score
+    )
+    scenario_label = (
+        "Annual-reconstitution NDX weights"
+        if rebalanced_view
+        else "Published NDX weights"
+    )
+    annual_value = (
+        f"{float(rebalanced_score):.2%}"
+        if rebalanced_score is not None and not pd.isna(rebalanced_score)
+        else "n/a"
+    )
+    pair = (
+        f"{summary.get('reference_fund') or 'NDX ETF'} vs "
+        f"{summary.get('spx_reference_fund') or 'SPX ETF'}"
+    )
+    st.markdown(
+        f"""
+        <div class="ndx-active-strip">
+          <div class="ndx-active-main">
+            <div class="ndx-eyebrow">NDX vs S&amp;P 500 Active Share</div>
+            <div class="ndx-active-value">{selected_score:.2%}</div>
+            <div class="ndx-score-context">{html.escape(scenario_label)}</div>
+          </div>
+          <div class="ndx-active-meaning">
+            <strong>{selected_score:.2%} of portfolio weight</strong> would need
+            to be reallocated to transform one index exposure into the other.
+          </div>
+          <div class="ndx-stat">
+            <div class="ndx-stat-label">ETF pair</div>
+            <div class="ndx-stat-value">{html.escape(pair)}</div>
+          </div>
+          <div class="ndx-stat">
+            <div class="ndx-stat-label">If annual reconstitution ran today</div>
+            <div class="ndx-stat-value">{annual_value}</div>
+          </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def _active_share_extreme_figure(
+    frame: pd.DataFrame,
+    *,
+    delta_column: str,
+    ndx_column: str,
+    side: str,
+) -> go.Figure:
+    if side == "ndx":
+        chart = frame.loc[frame[delta_column].gt(0)].nlargest(
+            10,
+            delta_column,
+        )
+        chart = chart.assign(display_delta=chart[delta_column])
+        color = "#177e78"
+        difference_label = "NDX overweight"
+    else:
+        chart = frame.loc[frame[delta_column].lt(0)].nsmallest(
+            10,
+            delta_column,
+        )
+        chart = chart.assign(display_delta=-chart[delta_column])
+        color = "#3f7dc0"
+        difference_label = "S&P 500 overweight"
+    chart = chart.sort_values("display_delta")
+    figure = go.Figure(
+        go.Bar(
+            x=chart["display_delta"],
+            y=chart["ticker"],
+            orientation="h",
+            marker={"color": color, "line": {"width": 0}},
+            text=chart["display_delta"].map(lambda value: f"+{value:.2%}"),
+            textposition="outside",
+            textfont={"color": color, "size": 10},
+            cliponaxis=False,
+            customdata=chart[[ndx_column, "spx_weight"]].to_numpy(),
+            hovertemplate=(
+                "<b>%{y}</b><br>"
+                f"{difference_label}: %{{x:.2%}}<br>"
+                "NDX weight: %{customdata[0]:.2%}<br>"
+                "S&P 500 weight: %{customdata[1]:.2%}"
+                "<extra></extra>"
+            ),
+        )
+    )
+    figure.update_layout(
+        template="plotly_dark" if IS_DARK_MODE else "plotly_white",
+        height=340,
+        margin={"l": 8, "r": 22, "t": 8, "b": 30},
+        showlegend=False,
+        bargap=0.3,
+        barcornerradius=6,
+        paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor="rgba(0,0,0,0)",
+        font={"color": THEME["chart_font"], "size": 11},
+        xaxis={
+            "title": None,
+            "tickformat": ".1%",
+            "gridcolor": THEME["chart_grid"],
+            "zeroline": False,
+            "range": _outside_label_axis_range(
+                chart["display_delta"],
+                padding_ratio=0.30,
+            ),
+        },
+        yaxis={"title": None, "showgrid": False},
+    )
+    return figure
+
+
+def _render_active_share_extremes(
+    components: pd.DataFrame,
+    *,
+    rebalanced_view: bool,
+) -> None:
+    frame, ndx_column, delta_column = _active_share_view_frame(
+        components,
+        rebalanced_view=rebalanced_view,
+    )
+    st.subheader("Largest index weight differences")
+    st.caption(
+        "The strongest single-security tilts in each direction across the "
+        "complete NDX and S&P 500 holdings union."
+    )
+    columns = st.columns(2, gap="large")
+    with columns[0]:
+        st.markdown("**NDX overweights**")
+        st.plotly_chart(
+            _active_share_extreme_figure(
+                frame,
+                delta_column=delta_column,
+                ndx_column=ndx_column,
+                side="ndx",
+            ),
+            width="stretch",
+            config={"displayModeBar": False},
+        )
+    with columns[1]:
+        st.markdown("**S&P 500 overweights**")
+        st.plotly_chart(
+            _active_share_extreme_figure(
+                frame,
+                delta_column=delta_column,
+                ndx_column=ndx_column,
+                side="spx",
+            ),
+            width="stretch",
+            config={"displayModeBar": False},
+        )
+
+
+def _render_active_share_top_x(
+    components: pd.DataFrame,
+    *,
+    rebalanced_view: bool,
+) -> None:
+    frame, ndx_column, _ = _active_share_view_frame(
+        components,
+        rebalanced_view=rebalanced_view,
+    )
+    ranked = frame.loc[frame[ndx_column].gt(0)].sort_values(
+        ndx_column,
+        ascending=False,
+    )
+    if ranked.empty:
+        return
+    st.subheader("NDX top-constituent concentration")
+    st.caption(
+        "Select the largest NDX constituents, compare their aggregate weight "
+        "in both indices, then inspect the security-level overlap."
+    )
+    maximum = min(100, len(ranked))
+    default = min(20, maximum)
+    selected_count = st.slider(
+        "Number of top NDX constituents",
+        min_value=1,
+        max_value=maximum,
+        value=default,
+        step=1,
+        key=f"active_share_top_x_{'annual' if rebalanced_view else 'live'}",
+    )
+    selected = ranked.head(selected_count).copy()
+    ndx_total = float(selected[ndx_column].sum())
+    spx_total = float(selected["spx_weight"].sum())
+    delta_total = ndx_total - spx_total
+    metrics = st.columns([1, 1, 1.2], gap="small")
+    metrics[0].metric(
+        f"Top {selected_count} in NDX",
+        f"{ndx_total:.2%}",
+    )
+    metrics[1].metric(
+        f"Same names in S&P 500",
+        f"{spx_total:.2%}",
+    )
+    metrics[2].metric(
+        "Concentration difference",
+        f"{delta_total:+.2%}",
+    )
+
+    chart = selected.sort_values(ndx_column)
+    figure = go.Figure()
+    figure.add_trace(
+        go.Bar(
+            x=chart["spx_weight"],
+            y=chart["ticker"],
+            orientation="h",
+            name="S&P 500",
+            marker={"color": "#3f7dc0", "line": {"width": 0}},
+            opacity=0.38,
+            width=0.74,
+            customdata=chart[[ndx_column]].to_numpy(),
+            hovertemplate=(
+                "<b>%{y}</b><br>"
+                "S&P 500 weight: %{x:.2%}<br>"
+                "NDX weight: %{customdata[0]:.2%}"
+                "<extra></extra>"
+            ),
+        )
+    )
+    figure.add_trace(
+        go.Bar(
+            x=chart[ndx_column],
+            y=chart["ticker"],
+            orientation="h",
+            name=(
+                "Annual NDX"
+                if rebalanced_view
+                else "Published NDX"
+            ),
+            marker={"color": "#177e78", "line": {"width": 0}},
+            opacity=0.76,
+            width=0.42,
+            customdata=chart[["spx_weight"]].to_numpy(),
+            hovertemplate=(
+                "<b>%{y}</b><br>"
+                "NDX weight: %{x:.2%}<br>"
+                "S&P 500 weight: %{customdata[0]:.2%}"
+                "<extra></extra>"
+            ),
+        )
+    )
+    figure.update_layout(
+        template="plotly_dark" if IS_DARK_MODE else "plotly_white",
+        height=max(380, 27 * selected_count + 100),
+        margin={"l": 8, "r": 18, "t": 18, "b": 35},
+        barmode="overlay",
+        bargap=0.2,
+        barcornerradius=5,
+        legend={
+            "orientation": "h",
+            "yanchor": "bottom",
+            "y": 1.01,
+            "xanchor": "left",
+            "x": 0,
+        },
+        paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor="rgba(0,0,0,0)",
+        font={"color": THEME["chart_font"], "size": 11},
+        xaxis={
+            "title": None,
+            "tickformat": ".1%",
+            "gridcolor": THEME["chart_grid"],
+            "zeroline": False,
+        },
+        yaxis={"title": None, "showgrid": False},
+    )
+    st.plotly_chart(
+        figure,
+        width="stretch",
+        config={"displayModeBar": False},
+    )
+
+
+def _render_active_share_panel(
+    database: SnapshotDatabase,
+    snapshot: dict[str, object],
+) -> None:
+    summary = database.get_active_share(int(snapshot["snapshot_id"]))
+    if summary is None:
+        st.info(
+            "No NDX vs S&P 500 comparison is stored for this snapshot. "
+            "Use Refresh to retrieve the matching iShares holdings."
+        )
+        return
+    components = pd.DataFrame(
+        database.get_active_share_components(int(snapshot["snapshot_id"]))
+    )
+    annual_available = (
+        summary.get("rebalanced_active_share") is not None
+        and not pd.isna(summary.get("rebalanced_active_share"))
+    )
+    rebalanced_view = st.toggle(
+        "Use annual-reconstitution NDX weights",
+        value=False,
+        disabled=not annual_available,
+        help=(
+            "Replace the published NDX ETF weights with the simulated full "
+            "annual reconstitution. S&P 500 ETF weights remain published."
+        ),
+    )
+    _render_active_share_strip(
+        summary,
+        rebalanced_view=rebalanced_view,
+    )
+    st.markdown(
+        (
+            '<div class="ndx-source-row"><span class="ndx-status-dot"></span>'
+            f"{html.escape(str(summary.get('reference_fund') or 'NDX ETF'))} "
+            f"holdings {html.escape(str(summary.get('ndx_holdings_as_of') or 'n/a'))}"
+            " &nbsp;|&nbsp; "
+            f"{html.escape(str(summary.get('spx_reference_fund') or 'SPX ETF'))} "
+            f"holdings {html.escape(str(summary.get('spx_holdings_as_of') or 'n/a'))}"
+            "</div>"
+        ),
+        unsafe_allow_html=True,
+    )
+    _render_active_share_extremes(
+        components,
+        rebalanced_view=rebalanced_view,
+    )
+    _render_active_share_top_x(
+        components,
+        rebalanced_view=rebalanced_view,
+    )
 
 
 def _render_weight_difference_chart(
@@ -1369,23 +1805,41 @@ def _render_rankings(
 
 title_columns = st.columns([4.6, 0.8], gap="small", vertical_alignment="top")
 with title_columns[0]:
-    st.title("Nasdaq-100 Weight Distortion")
-    st.caption("Live ETF weights compared with a pure-capitalization reference.")
+    st.title("Nasdaq-100 Analytics")
 with title_columns[1]:
-    theme_clicked = st.button(
+    st.button(
         "Light mode" if IS_DARK_MODE else "Night mode",
         icon=":material/light_mode:" if IS_DARK_MODE else ":material/dark_mode:",
         key="theme_toggle",
         width="stretch",
         help="Switch the dashboard color theme.",
+        on_click=_toggle_dark_mode,
     )
 
-if theme_clicked:
-    st.session_state["dark_mode"] = not IS_DARK_MODE
-    st.rerun()
+panel_label = st.segmented_control(
+    "Analysis",
+    ["NDX Distortion Index", "NDX vs S&P 500"],
+    default="NDX Distortion Index",
+    required=True,
+    key="analysis_panel_selector",
+    width="stretch",
+)
+st.caption(
+    (
+        "Live ETF weights compared with a pure-capitalization reference."
+        if panel_label == "NDX Distortion Index"
+        else "Security-level Active Share between matching Nasdaq-100 and "
+        "S&P 500 iShares ETFs."
+    )
+)
 
+control_widths = (
+    [1.05, 1.05, 0.48, 0.62]
+    if panel_label == "NDX Distortion Index"
+    else [1.2, 0.48, 0.72]
+)
 control_columns = st.columns(
-    [1.05, 1.05, 0.48, 0.62],
+    control_widths,
     gap="small",
     vertical_alignment="bottom",
 )
@@ -1398,29 +1852,43 @@ with control_columns[0]:
         key="universe_selector",
         width="stretch",
     )
-with control_columns[1]:
-    basis_label = st.segmented_control(
-        "Capitalization basis",
-        ["Free float", "Total"],
-        default="Free float",
-        required=True,
-        key="basis_selector",
-        width="stretch",
-    )
 
 universe = {"Non-UCITS": "non_ucits", "UCITS": "ucits"}[universe_label]
-weighting_basis = {"Free float": "float", "Total": "total"}[basis_label]
+if panel_label == "NDX Distortion Index":
+    with control_columns[1]:
+        basis_label = st.segmented_control(
+            "Capitalization basis",
+            ["Free float", "Total"],
+            default="Free float",
+            required=True,
+            key="basis_selector",
+            width="stretch",
+        )
+    weighting_basis = {"Free float": "float", "Total": "total"}[basis_label]
+    refresh_column = control_columns[2]
+    help_column = control_columns[3]
+else:
+    basis_label = "Free float"
+    weighting_basis = "float"
+    refresh_column = control_columns[1]
+    help_column = control_columns[2]
 
-with control_columns[2]:
+with refresh_column:
     recompute_clicked = st.button(
         "Refresh",
         icon=":material/refresh:",
         type="primary",
         width="stretch",
-        help=f"Refresh live data for {universe_label}.",
+        help=(
+            f"Refresh live data for {universe_label}, including the matching "
+            "S&P 500 ETF comparison."
+        ),
     )
-with control_columns[3]:
-    _render_method_help(weighting_basis)
+with help_column:
+    if panel_label == "NDX Distortion Index":
+        _render_method_help(weighting_basis)
+    else:
+        _render_active_share_help()
 
 if recompute_clicked:
     with st.spinner(f"Refreshing {universe_label}..."):
@@ -1448,46 +1916,53 @@ if notice := st.session_state.pop("_refresh_notice", None):
     st.toast(notice, icon=":material/check_circle:")
 
 components = pd.DataFrame(database.get_components(int(snapshot["snapshot_id"])))
-_render_score_strip(
-    snapshot,
-    components,
-    universe_label,
-    basis_label,
-)
-show_rebalanced = _render_rebalance_controls(snapshot)
-_render_source_status(snapshot)
-display_components = _components_for_view(
-    components,
-    rebalanced_view=show_rebalanced,
-)
+if panel_label == "NDX vs S&P 500":
+    _render_active_share_panel(database, snapshot)
+    st.caption(
+        "Active Share uses the complete normalized equity holdings union. "
+        "ETF pairs are never merged or averaged across regulatory universes."
+    )
+else:
+    _render_score_strip(
+        snapshot,
+        components,
+        universe_label,
+        basis_label,
+    )
+    show_rebalanced = _render_rebalance_controls(snapshot)
+    _render_source_status(snapshot)
+    display_components = _components_for_view(
+        components,
+        rebalanced_view=show_rebalanced,
+    )
 
-show_history = universe == "non_ucits" and weighting_basis == "float"
-if show_history:
-    chart_columns = st.columns([0.93, 1.35], gap="large")
-    with chart_columns[0]:
+    show_history = universe == "non_ucits" and weighting_basis == "float"
+    if show_history:
+        chart_columns = st.columns([0.93, 1.35], gap="large")
+        with chart_columns[0]:
+            _render_weight_difference_chart(
+                display_components,
+                rebalanced_view=show_rebalanced,
+            )
+        with chart_columns[1]:
+            _render_quarterly_history(snapshot)
+    else:
         _render_weight_difference_chart(
             display_components,
             rebalanced_view=show_rebalanced,
         )
-    with chart_columns[1]:
-        _render_quarterly_history(snapshot)
-else:
-    _render_weight_difference_chart(
+
+    if show_rebalanced:
+        _render_rebalance_changes_chart(components)
+        _render_rebalance_membership_chart(components)
+
+    _render_rankings(
         display_components,
+        weighting_basis,
         rebalanced_view=show_rebalanced,
     )
 
-if show_rebalanced:
-    _render_rebalance_changes_chart(components)
-    _render_rebalance_membership_chart(components)
-
-_render_rankings(
-    display_components,
-    weighting_basis,
-    rebalanced_view=show_rebalanced,
-)
-
-st.caption(
-    "Universes are never merged or averaged. Each score retains the reference "
-    "fund and holdings source that were actually used."
-)
+    st.caption(
+        "Universes are never merged or averaged. Each score retains the reference "
+        "fund and holdings source that were actually used."
+    )

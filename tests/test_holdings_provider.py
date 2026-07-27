@@ -9,7 +9,7 @@ from qqq_holdings_provider import (
     IsharesSpreadsheetXmlHoldingsProvider,
     parse_qqq_holdings_csv,
 )
-from snapshot_service import build_holdings_chain
+from snapshot_service import build_holdings_chain, build_spx_holdings_chain
 
 
 def test_holdings_parser_removes_non_equities_and_normalizes():
@@ -137,3 +137,16 @@ def test_ishares_funds_are_prioritized_before_invesco(monkeypatch):
         "CNDX",
         "EQQQ",
     ]
+
+
+def test_spx_chains_use_matching_ishares_funds(monkeypatch):
+    monkeypatch.delenv("NON_UCITS_SPX_HOLDINGS_CSV", raising=False)
+    monkeypatch.delenv("UCITS_SPX_HOLDINGS_CSV", raising=False)
+
+    non_ucits = build_spx_holdings_chain("non_ucits")
+    ucits = build_spx_holdings_chain("ucits")
+
+    assert non_ucits.min_constituents == 450
+    assert ucits.max_constituents == 550
+    assert [provider.reference_fund for provider in non_ucits.providers] == ["IVV"]
+    assert [provider.reference_fund for provider in ucits.providers] == ["CSPX"]
