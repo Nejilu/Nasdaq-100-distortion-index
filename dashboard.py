@@ -785,7 +785,11 @@ def _components_for_view(
     return data
 
 
-def _outside_label_axis_range(values: pd.Series) -> list[float]:
+def _outside_label_axis_range(
+    values: pd.Series,
+    *,
+    padding_ratio: float = 0.24,
+) -> list[float]:
     """Reserve horizontal plot space for labels placed past bar endpoints."""
     numeric = pd.to_numeric(values, errors="coerce").dropna()
     if numeric.empty:
@@ -793,7 +797,7 @@ def _outside_label_axis_range(values: pd.Series) -> list[float]:
     lower = min(0.0, float(numeric.min()))
     upper = max(0.0, float(numeric.max()))
     span = max(upper - lower, 0.01)
-    padding = 0.24 * span
+    padding = padding_ratio * span
     return [lower - padding, upper + padding]
 
 
@@ -935,6 +939,8 @@ def _render_rebalance_changes_chart(components: pd.DataFrame) -> None:
                 lambda value: f"{value:+.2%}"
             ),
             textposition="outside",
+            textfont={"color": colors, "size": 10},
+            cliponaxis=False,
             customdata=frame[["actual_weight", "rebalance_weight"]].to_numpy(),
             hovertemplate=(
                 "<b>%{y}</b><br>"
@@ -961,6 +967,9 @@ def _render_rebalance_changes_chart(components: pd.DataFrame) -> None:
             "tickformat": ".1%",
             "gridcolor": THEME["chart_grid"],
             "zeroline": False,
+            "range": _outside_label_axis_range(
+                frame["rebalance_weight_change"]
+            ),
         },
         yaxis={"title": None, "showgrid": False},
     )
@@ -1017,6 +1026,8 @@ def _render_rebalance_membership_chart(components: pd.DataFrame) -> None:
                 axis=1,
             ),
             textposition="outside",
+            textfont={"color": colors, "size": 10},
+            cliponaxis=False,
             customdata=frame[
                 ["movement", "actual_weight", "rebalance_weight"]
             ].to_numpy(),
@@ -1045,6 +1056,10 @@ def _render_rebalance_membership_chart(components: pd.DataFrame) -> None:
             "tickformat": ".1%",
             "gridcolor": THEME["chart_grid"],
             "zeroline": False,
+            "range": _outside_label_axis_range(
+                frame["membership_weight"],
+                padding_ratio=0.40,
+            ),
         },
         yaxis={"title": None, "showgrid": False},
     )
