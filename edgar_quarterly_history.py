@@ -263,6 +263,20 @@ def calculate_quarterly_point(
 ) -> dict[str, float | int]:
     """Calculate raw and missing-weight-corrected quarterly scores."""
     components = calculate_quarterly_components(qqq, spgm)
+    return _summarize_quarterly_components(
+        components,
+        qqq_equity_count=len(qqq),
+        spgm_equity_count=len(spgm),
+    )
+
+
+def _summarize_quarterly_components(
+    components: pd.DataFrame,
+    *,
+    qqq_equity_count: int,
+    spgm_equity_count: int,
+) -> dict[str, float | int]:
+    """Summarize a previously calculated quarterly component table."""
     matched = components["match_status"].eq("matched")
     estimated = components["correction_status"].eq("estimated_missing_spgm")
     non_comparable = components["correction_status"].eq(
@@ -292,8 +306,8 @@ def calculate_quarterly_point(
             components["correction_ratio_median"].dropna().iloc[0]
         ),
         "coverage_ratio": qqq_matched_total / qqq_total,
-        "qqq_equity_count": int(len(qqq)),
-        "spgm_equity_count": int(len(spgm)),
+        "qqq_equity_count": int(qqq_equity_count),
+        "spgm_equity_count": int(spgm_equity_count),
         "matched_count": int(matched.sum()),
         "estimated_count": int(estimated.sum()),
         "excluded_qqq_count": int(
@@ -461,8 +475,12 @@ def build_quarterly_history(
         spgm_filing = spgm_by_date[report_date]
         qqq_positions = positions_by_accession[qqq_filing.accession]
         spgm_positions = positions_by_accession[spgm_filing.accession]
-        point = calculate_quarterly_point(qqq_positions, spgm_positions)
         components = calculate_quarterly_components(qqq_positions, spgm_positions)
+        point = _summarize_quarterly_components(
+            components,
+            qqq_equity_count=len(qqq_positions),
+            spgm_equity_count=len(spgm_positions),
+        )
         components.insert(0, "report_date", report_date)
         all_components.append(components)
         for filing, positions in [
@@ -573,7 +591,7 @@ def _download_filing(filing: NportFiling, *, timeout: int) -> tuple[str, str]:
         headers=_sec_headers(),
         timeout=timeout,
     )
-    if direct.ok and "edgarSubmission" in direct.text[:1_000]:
+    if direct.ok and _is_edgar_submission(direct.text):
         return direct.text, "sec_direct"
 
     proxy_base = os.getenv("SEC_READER_PROXY", DEFAULT_READER_PROXY).rstrip("/")
@@ -601,9 +619,7 @@ def _download_filing(filing: NportFiling, *, timeout: int) -> tuple[str, str]:
                 time.sleep(max(retry_after, min(2 ** (attempt + 1), 30)))
                 continue
             response.raise_for_status()
-            if not response.text.lstrip().casefold().startswith(
-                "<edgarsubmission"
-            ):
+            if not _is_edgar_submission(response.text):
                 raise ValueError(
                     "The SEC reader fallback did not return a complete N-PORT XML root."
                 )
@@ -615,6 +631,17 @@ def _download_filing(filing: NportFiling, *, timeout: int) -> tuple[str, str]:
     raise RuntimeError(
         f"Unable to retrieve SEC filing {filing.accession}: {last_error}"
     )
+
+
+def _is_edgar_submission(content: str) -> bool:
+    """Return whether the response begins with an EDGAR submission XML root."""
+    prefix = content[:1_000].lstrip("\ufeff \t\r\n")
+    if prefix.casefold().startswith("<?xml"):
+        declaration_end = prefix.find("?>")
+        if declaration_end < 0:
+            return False
+        prefix = prefix[declaration_end + 2 :].lstrip()
+    return bool(re.match(r"<\s*edgarsubmission\b", prefix, flags=re.IGNORECASE))
 
 
 def _sec_headers() -> dict[str, str]:

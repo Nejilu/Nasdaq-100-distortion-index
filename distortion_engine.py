@@ -135,12 +135,9 @@ def calculate_distortion(
         )
         valid = ~missing_reference_shares
         reference_shares = pd.Series(np.nan, index=data.index)
-        missing_float_for_result = reference_status.eq(
-            "missing_float_yfinance_fallback"
-        )
-        missing_price_for_result = reference_status.eq(
-            "missing_price_yfinance_fallback"
-        )
+        needs_yfinance_fallback = ~reference_status.eq("valid_acwi")
+        missing_float_for_result = needs_yfinance_fallback & missing_float
+        missing_price_for_result = needs_yfinance_fallback & missing_price
         invalid_float_for_result = invalid_reference_shares
     elif weighting_basis == "float":
         reference_shares = data["float_shares"]

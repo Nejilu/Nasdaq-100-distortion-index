@@ -656,7 +656,8 @@ def _render_history_help() -> None:
         )
         st.caption(
             "Diamond markers identify annual December reconstitutions. The star "
-            "identifies the July 2023 special rebalance."
+            "marks the September 2023 quarter-end observation following the July "
+            "2023 special rebalance."
         )
 
 
@@ -747,7 +748,7 @@ def _render_quarterly_history(snapshot: dict[str, object]) -> None:
                 "line": {"color": THEME["marker_outline"], "width": 1},
             },
             hovertemplate=(
-                "<b>2023 special rebalance</b><br>"
+                "<b>Quarter after the July 2023 special rebalance</b><br>"
                 "%{x|%b %Y}<br>NDX_WDI: %{y:.2f}<extra></extra>"
             ),
         )

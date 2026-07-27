@@ -3,11 +3,18 @@ import math
 import pandas as pd
 
 from edgar_quarterly_history import (
+    _is_edgar_submission,
     _rebalance_type,
     calculate_quarterly_components,
     calculate_quarterly_point,
     parse_nport_positions,
 )
+
+
+def test_edgar_submission_detection_is_case_insensitive_and_allows_preamble():
+    assert _is_edgar_submission("<edgarsubmission><header />")
+    assert _is_edgar_submission(" \n<?xml version='1.0'?><EDGARSUBMISSION>")
+    assert not _is_edgar_submission("<html><body>SEC rate limit</body></html>")
 
 
 def test_parse_complete_nport_xml_with_bare_ampersand():

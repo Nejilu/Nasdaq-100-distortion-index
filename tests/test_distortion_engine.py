@@ -220,6 +220,33 @@ def test_direct_acwi_weights_do_not_require_yfinance_prices_or_float_shares():
     assert components.loc["ADR", "data_status"] == "invalid_yfinance_fallback"
 
 
+def test_direct_weights_count_both_missing_price_and_float_for_fallback():
+    holdings = pd.DataFrame(
+        {
+            "ticker": ["ACWI", "MISSING"],
+            "company_name": ["ACWI Match", "Missing Fallback"],
+            "actual_weight": [0.90, 0.10],
+        }
+    )
+    reference_data = pd.DataFrame(
+        {
+            "ticker": ["ACWI", "MISSING"],
+            "price": [None, None],
+            "float_shares": [None, None],
+            "reference_weight_raw": [100.0, None],
+            "reference_source": ["ishares_acwi", "yfinance_fallback"],
+            "reference_status": ["valid_acwi", "missing_float_yfinance_fallback"],
+        }
+    )
+
+    result = calculate_distortion(holdings, reference_data)
+
+    assert result.missing_price_count == 1
+    assert result.missing_float_count == 1
+    assert result.missing_reference_shares_count == 1
+    assert math.isclose(result.coverage_ratio, 0.90)
+
+
 def test_yfinance_cache_is_redirected_to_a_writable_local_directory(tmp_path, monkeypatch):
     captured: dict[str, str] = {}
     fake_yfinance = SimpleNamespace(
