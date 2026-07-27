@@ -777,6 +777,18 @@ def _components_for_view(
     return data
 
 
+def _outside_label_axis_range(values: pd.Series) -> list[float]:
+    """Reserve horizontal plot space for labels placed past bar endpoints."""
+    numeric = pd.to_numeric(values, errors="coerce").dropna()
+    if numeric.empty:
+        return [-0.01, 0.01]
+    lower = min(0.0, float(numeric.min()))
+    upper = max(0.0, float(numeric.max()))
+    span = max(upper - lower, 0.01)
+    padding = 0.24 * span
+    return [lower - padding, upper + padding]
+
+
 def _render_weight_difference_chart(
     components: pd.DataFrame,
     *,
@@ -837,6 +849,7 @@ def _render_weight_difference_chart(
             text=change_labels,
             textposition="outside" if rebalanced_view else "none",
             textfont={"color": change_colors, "size": 10},
+            cliponaxis=False,
             customdata=custom_data,
             hovertemplate=(
                 "<b>%{y}</b><br>"
@@ -865,6 +878,11 @@ def _render_weight_difference_chart(
             "tickformat": ".1%",
             "gridcolor": THEME["chart_grid"],
             "zeroline": False,
+            "range": (
+                _outside_label_axis_range(chart_frame["weight_delta"])
+                if rebalanced_view
+                else None
+            ),
         },
         yaxis={"title": None, "showgrid": False},
     )
