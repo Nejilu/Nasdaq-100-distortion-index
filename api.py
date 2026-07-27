@@ -9,7 +9,7 @@ from typing import Literal
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Query
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 
 from database import SnapshotDatabase
 from snapshot_service import recompute_all_snapshots, recompute_snapshot
@@ -18,13 +18,17 @@ from snapshot_service import recompute_all_snapshots, recompute_snapshot
 load_dotenv()
 app = FastAPI(
     title="NDX Weight Distortion Index API",
-    version="0.1.0",
-    description="Compare les poids QQQ avec une pondération pure par capitalisation flottante.",
+    version="0.2.0",
+    description=(
+        "Compare published ETF weights with ACWI free-float or total-capitalization "
+        "counterfactual weights."
+    ),
 )
 
 
 class RecomputeRequest(BaseModel):
-    mode: Literal["auto", "live", "sample"] = "auto"
+    model_config = ConfigDict(extra="forbid")
+
     universe: Literal["all", "non_ucits", "ucits"] = "all"
     weighting_basis: Literal["float", "total"] = "float"
     holdings_csv: str | None = None
@@ -48,12 +52,12 @@ def current(
     if universe:
         snapshot = database.get_current(universe, weighting_basis)
         if snapshot is None:
-            raise HTTPException(status_code=404, detail=f"Aucun snapshot {universe} enregistré.")
+            raise HTTPException(status_code=404, detail=f"No {universe} snapshot is available.")
         snapshot["snapshot_status"] = snapshot["status"]
         return snapshot
     snapshots = database.get_current_by_universe(weighting_basis)
     if not snapshots:
-        raise HTTPException(status_code=404, detail="Aucun snapshot enregistré.")
+        raise HTTPException(status_code=404, detail="No snapshots are available.")
     for snapshot in snapshots.values():
         snapshot["snapshot_status"] = snapshot["status"]
     return {"snapshots": snapshots}
@@ -83,7 +87,7 @@ def components(
 ) -> list[dict[str, object]]:
     database = get_database()
     if snapshot_id is not None and database.get_snapshot(snapshot_id) is None:
-        raise HTTPException(status_code=404, detail="Snapshot introuvable.")
+        raise HTTPException(status_code=404, detail="Snapshot not found.")
     rows = database.get_components(
         snapshot_id, universe=universe, weighting_basis=weighting_basis
     )
@@ -107,22 +111,20 @@ def components(
 @app.post("/api/recompute", status_code=201)
 def recompute(payload: RecomputeRequest) -> dict[str, object]:
     if payload.holdings_csv and not Path(payload.holdings_csv).exists():
-        raise HTTPException(status_code=400, detail="Le fichier holdings_csv n'existe pas.")
+        raise HTTPException(status_code=400, detail="The holdings_csv file does not exist.")
     try:
         if payload.universe == "all":
             if payload.holdings_csv:
                 raise HTTPException(
                     status_code=400,
-                    detail="holdings_csv exige universe=non_ucits ou universe=ucits.",
+                    detail="holdings_csv requires universe=non_ucits or universe=ucits.",
                 )
             outcomes = recompute_all_snapshots(
-                mode=payload.mode,
                 db_path=os.getenv("NDX_DB_PATH", "data/ndx_wdi.sqlite3"),
                 weighting_basis=payload.weighting_basis,
             )
             return {"snapshots": {outcome.universe: outcome.summary() for outcome in outcomes}}
         return recompute_snapshot(
-            mode=payload.mode,
             db_path=os.getenv("NDX_DB_PATH", "data/ndx_wdi.sqlite3"),
             holdings_csv=payload.holdings_csv,
             universe=payload.universe,
@@ -131,4 +133,4 @@ def recompute(payload: RecomputeRequest) -> dict[str, object]:
     except HTTPException:
         raise
     except Exception as exc:
-        raise HTTPException(status_code=502, detail=f"Recalcul impossible: {exc}") from exc
+        raise HTTPException(status_code=502, detail=f"Recomputation failed: {exc}") from exc

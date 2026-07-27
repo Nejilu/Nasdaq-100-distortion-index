@@ -1,79 +1,211 @@
-# NDX Weight Distortion Index — MVP
+# NDX Weight Distortion Index
 
-Ce projet mesure séparément l’écart entre les pondérations publiées par des ETF Nasdaq-100 non-UCITS et UCITS, et les poids qu’auraient les mêmes titres selon leur seule capitalisation flottante.
+This project measures the gap between published Nasdaq-100 ETF weights and the
+weights the same securities would receive under a pure capitalization-based
+counterfactual.
+
+The default view uses the official iShares ACWI portfolio as a free-float
+reference:
 
 ```text
-float_market_cap = price × float_shares
-float_weight = float_market_cap / Σ(float_market_cap)
+reference_mass = ACWI holding market value
+float_weight = reference_mass / sum(reference_mass for Nasdaq-100 constituents)
 weight_delta = actual_weight - float_weight
-NDX_WDI = 50 × Σ(abs(weight_delta))
+NDX_WDI = 50 x sum(abs(weight_delta))
 ```
 
-Le dashboard permet aussi de basculer vers le contrefactuel en capitalisation cotée totale :
+ACWI market values are used instead of the displayed `Weight (%)` field because
+the market values retain precision for small positions. ADR/ADS securities and
+names absent from ACWI use a yfinance free-float fallback calibrated into the
+same ACWI fund-value units with the median ratio observed across matched names.
 
 ```text
-total_market_cap = price × shares_outstanding
-total_cap_weight = total_market_cap / Σ(total_market_cap)
+fallback_scale = median(ACWI_market_value / yfinance_float_market_cap)
+fallback_reference_mass = yfinance_float_market_cap x fallback_scale
+counterfactual_weight = reference_mass / sum(all_ACWI_and_fallback_reference_masses)
+```
+
+The last line renormalizes the covered selection to exactly 100%; fallbacks are
+never normalized separately from the ACWI-matched securities.
+
+The dashboard can also switch to total listed capitalization:
+
+```text
+total_market_cap = price x shares_outstanding
+total_cap_weight = total_market_cap / sum(total_market_cap)
 weight_delta = actual_weight - total_cap_weight
 ```
 
-Un `NDX_WDI` de 5 signifie que 5 % du poids total devrait être réalloué pour passer d’une distribution à l’autre.
+An `NDX_WDI` of 5 means that 5% of the total index weight would need to be
+reallocated to move from one distribution to the other.
 
-## Périmètre et choix méthodologiques
+## Scope and methodology
 
-- Deux univers indépendants sont enregistrés : `non_ucits` et `ucits`. Ils ne sont jamais fusionnés ou moyennés.
-- Deux bases de contrefactuel sont également séparées en SQLite : `float` et `total`. Le toggle du dashboard ne mélange jamais leurs snapshots ni leurs historiques.
-- Les pondérations réelles sont toujours lues telles que publiées par le fonds retenu. Le MVP ne reconstruit pas les poids d’un ETF à partir de ses prix ou quantités ; GOOG et GOOGL restent distincts.
-- Le cash et les positions explicitement non-actions sont retirés, puis les poids actions sont normalisés à 100 %.
-- Prix, `floatShares`, `sharesOutstanding` et `marketCap` viennent de `yfinance`. Les deux derniers champs servent uniquement de contrôles et ne remplacent jamais un flottant manquant ou invalide.
-- Le cache SQLite interne de yfinance est stocké dans `data/yfinance_cache` afin que l'application fonctionne même lorsque le cache utilisateur Windows dans `AppData` est inaccessible.
-- Un titre sans prix/flottant positif, ou dont le flottant dépasse de façon incohérente les actions en circulation ou la capitalisation totale, est exclu du score et reste visible avec son `data_status`.
-- Lorsqu'un même flottant consolidé est publié à l'identique pour plusieurs classes manifestement liées (actuellement GOOG/GOOGL), il est réparti au prorata des actions en circulation par classe et signalé par `valid_shared_float_allocated`.
-- Le `coverage_ratio` mesure le poids publié avant exclusion. Les poids réels des titres couverts sont ensuite renormalisés à 100 % afin de comparer deux distributions sur exactement le même univers.
-- `complete` signifie une couverture au moins égale à `NDX_COVERAGE_THRESHOLD` (99 % par défaut), `partial_coverage` une couverture inférieure, et `sample_fallback` l’usage des données fictives.
+- Two independent universes are stored: `non_ucits` and `ucits`. They are never
+  merged or averaged.
+- Two counterfactual bases are stored separately in SQLite: `float` and `total`.
+  Switching the dashboard control never mixes their snapshots or histories.
+- Published ETF weights are always used as reported by the selected fund. The
+  project does not reconstruct ETF weights from prices or quantities.
+- GOOG and GOOGL remain separate securities.
+- Cash and explicitly non-equity positions are removed before equity weights are
+  normalized to 100%.
+- ACWI holding market values come from the official BlackRock/iShares public
+  holdings download. Exact tickers are disambiguated with company names, which
+  prevents collisions such as US `ADP` versus Aéroports de Paris and US `ROP`
+  versus Roche.
+- ADR/ADS rows are labeled and deliberately bypass ACWI because ACWI may hold
+  the issuer's primary listing rather than the US depositary receipt. Current
+  defaults are `ARM`, `ASML`, and `PDD`; `NDX_ADR_TICKERS` can extend the list.
+- Prices, `floatShares`, `sharesOutstanding`, and `marketCap` come from
+  `yfinance`. They support total capitalization, fallback weights, and fallback
+  consistency checks.
+- The internal yfinance SQLite cache is stored in `data/yfinance_cache` so the
+  application remains usable when the Windows user cache is not writable.
+- An ACWI match does not require a yfinance price or float count. A missing or
+  invalid yfinance value only excludes a security that requires fallback.
+- A fallback float inconsistent with shares outstanding or total market
+  capitalization is excluded without substitution.
+- The legacy all-yfinance method remains the global fallback if the ACWI
+  download cannot be validated.
+- `coverage_ratio` measures the published weight represented before exclusions.
+  Covered published weights are then normalized to 100% so both distributions
+  are compared over the same investable set.
+- `complete` means coverage is at least `NDX_COVERAGE_THRESHOLD` (99% by
+  default); lower coverage is reported as `partial_coverage`.
 
-Les ETF demeurent des proxys de l’indice, et les données de marché gratuites ne constituent pas une source officielle ou garantie. L’historique local commence au premier snapshot.
+The ETF holdings remain proxies for the index, and free market-data sources are
+not official or guaranteed. Local history starts with the first saved snapshot.
 
-## Sources de pondérations et fallbacks
+## Capitalization references
 
-Chaque source doit contenir entre 90 et 130 actions, des tickers uniques et des poids valides. Les pages limitées au top 10, les exports HTML et les fichiers partiels sont rejetés.
+The two dashboard bases are analytical comparison scenarios:
 
-Ordre `non_ucits` :
+- **Free Float** uses shares readily available for public trading. This is the
+  convention used by major investable benchmarks such as the
+  [S&P 500](https://www.spglobal.com/spdji/en/methodology/article/sp-us-indices-methodology/)
+  and the
+  [MSCI World](https://www.msci.com/indexes/index/990100/msci-world-index).
+- **Total** uses all shares outstanding, including strategic holdings that may
+  not be readily tradable. The
+  [Nasdaq Composite](https://www.nasdaq.com/newsroom/nasdaq-composite-vs-nasdaq-100-what-investors-should-know)
+  is a useful reference for this approach.
 
-1. CSV local explicite (`NON_UCITS_HOLDINGS_CSV` ou `--holdings-csv`) ;
-2. téléchargement officiel BlackRock/iShares IQQ ;
-3. holdings publics Invesco QQQ ;
-4. URLs CSV configurées dans `NON_UCITS_FALLBACK_URLS`.
+The official
+[Nasdaq-100 methodology](https://indexes.nasdaq.com/docs/Methodology_NDX.pdf)
+uses modified market capitalization with float and concentration constraints.
+Neither dashboard scenario is intended to reproduce that methodology exactly.
 
-Ordre `ucits` :
+## Holdings sources and fallbacks
 
-1. CSV local explicite (`UCITS_HOLDINGS_CSV` ou `--holdings-csv`) ;
-2. CSV officiel iShares CNDX ;
-3. holdings publics Invesco EQQQ ;
-4. URLs CSV configurées dans `UCITS_FALLBACK_URLS`, prévues notamment pour Xtrackers ou UBS.
+Every source must contain between 90 and 130 equities, unique tickers, and valid
+published weights. Top-10 pages, HTML responses, and incomplete exports are
+rejected.
 
-La source Nasdaq publique observée ne présentant que les principales positions n’est pas utilisée comme univers complet. Le champ `reference_fund`, la date publiée et les échecs des sources précédentes sont conservés avec chaque snapshot.
+`non_ucits` source order:
+
+1. Explicit local CSV (`NON_UCITS_HOLDINGS_CSV` or `--holdings-csv`)
+2. Official BlackRock/iShares IQQ download
+3. Public Invesco QQQ holdings
+4. CSV URLs configured in `NON_UCITS_FALLBACK_URLS`
+
+`ucits` source order:
+
+1. Explicit local CSV (`UCITS_HOLDINGS_CSV` or `--holdings-csv`)
+2. Official iShares CNDX CSV
+3. Public Invesco EQQQ holdings
+4. CSV URLs configured in `UCITS_FALLBACK_URLS`, including optional Xtrackers
+   or UBS sources
+
+The observed public Nasdaq page exposes only leading holdings and is not accepted
+as a complete universe. Each snapshot retains the selected `reference_fund`,
+published holdings date, and failures from preceding sources.
+
+For the free-float calculation, the official ACWI download is then used as the
+primary reference. Matching is one Nasdaq-100 ticker at a time and requires a
+compatible company name. The resulting ACWI market values, plus any calibrated
+yfinance fallback values, are renormalized to 100% across the covered
+Nasdaq-100 selection.
+
+## Quarterly SEC history
+
+The dashboard's long-term chart is not built from local refresh snapshots. It
+contains exactly one observation per public quarter from the first available
+Form N-PORT data in September 2019.
+
+For each quarter:
+
+1. The QQQ and SPGM N-PORT-P accessions are discovered in SEC EDGAR.
+2. Equity positions are matched by exact CUSIP, not ticker or company name.
+3. Missing ADRs and incompatible listing forms are excluded from both
+   distributions.
+4. For each other QQQ security absent from SPGM, its counterfactual weight is
+   estimated from the median observed ratio among matched QQQ overweights:
+   `estimated_SPGM_weight = QQQ_weight / median_overweight_ratio`.
+5. Observed and estimated SPGM weights are combined, then QQQ and SPGM are each
+   independently renormalized to 100%.
+6. `NDX_WDI = 50 x sum(abs(QQQ_weight - SPGM_weight))`.
+
+This historical method is deliberately separate from the live ACWI method. SPGM
+did not hold every QQQ security in the early years: September 2019 matches 53 of
+103 QQQ equity CUSIPs and covers about 85% of the comparable QQQ equity weight.
+The matched-only score is retained as `ndx_wdi_raw`, while `ndx_wdi` contains
+the corrected series used by the chart.
+
+The correction was selected through historical masking tests rather than from a
+single current snapshot. Rank-based missingness patterns observed from 2019
+through 2021 were applied to the better-covered 2022-2026 quarters. Across 170
+tests at 86.5% average coverage, median-ratio imputation reduced mean absolute
+error from 2.40 to 0.65 NDX_WDI points (72.7%) and improved the result in 169
+tests. The raw score, correction size, estimated count, and non-comparable
+exclusion count remain available for audit.
+
+Rebuild the complete history with:
+
+```powershell
+python run_quarterly_history.py
+```
+
+The command stores all 54 complete filing XML documents under
+`data/sec_nport_filings/raw/{qqq|spgm}/{report_date}/{accession}/`, plus:
+
+- `manifest.csv`: accession, official SEC URL, local path, transport, file size,
+  and SHA-256 checksum.
+- `positions.csv.gz`: every normalized equity position from both funds.
+- `constituent_history.csv.gz`: raw and corrected quarterly weights, weight gap,
+  contribution, estimation status, and exclusion status for every QQQ CUSIP.
+- `data/edgar_quarterly_history.csv`: the compact 27-point dashboard series.
+
+The full local filing archive is ignored by Git. Direct SEC archive downloads
+are attempted first. When SEC blocks the runtime's network address, the
+configured reader transport retrieves the complete XML document element from
+the same official SEC archive URL; the manifest records which transport was
+used.
 
 ## Architecture
 
 ```text
-qqq_holdings_provider.py  # chaînes QQQ/IQQ et CNDX/EQQQ + CSV configurables
-market_data_provider.py   # yfinance + provider CSV local
-distortion_engine.py      # calcul pur, couverture et statuts
-database.py               # schéma et accès SQLite
-snapshot_service.py       # orchestration et fallback explicite
-api.py                    # FastAPI
-dashboard.py              # Streamlit
-run_snapshot.py           # CLI ponctuelle ou quotidienne
-data/                     # données fictives versionnées
-tests/                    # calcul, parsing, persistance et API
+qqq_holdings_provider.py  # IQQ/QQQ and CNDX/EQQQ provider chains
+acwi_weights_provider.py  # ACWI matching, ADR labels, calibrated fallbacks
+edgar_quarterly_history.py # N-PORT archive, CUSIP history, quarterly scores
+market_data_provider.py   # live market data through yfinance
+distortion_engine.py      # pure calculations, coverage, and statuses
+database.py               # SQLite schema and access
+snapshot_service.py       # live snapshot orchestration
+api.py                    # FastAPI application
+dashboard.py              # Streamlit dashboard
+run_snapshot.py           # one-off and scheduled CLI
+run_quarterly_history.py  # rebuild the SEC quarterly archive and chart data
+tests/                    # calculations, parsing, persistence, and API tests
 ```
 
-Les providers exposent des contrats minimaux, ce qui permet de remplacer Invesco ou yfinance sans toucher au moteur, à l’API ou au dashboard.
+Providers expose small contracts, allowing a licensed or more reliable data feed
+to replace Invesco or yfinance without changing the calculation engine, API, or
+dashboard.
 
 ## Installation
 
-Python 3.11 ou 3.12 est recommandé.
+Python 3.11 or 3.12 is recommended.
 
 ### Windows PowerShell
 
@@ -85,7 +217,7 @@ pip install -r requirements.txt
 Copy-Item .env.example .env
 ```
 
-### macOS / Linux
+### macOS and Linux
 
 ```bash
 python -m venv .venv
@@ -95,43 +227,60 @@ pip install -r requirements.txt
 cp .env.example .env
 ```
 
-## Premier lancement hors ligne
-
-Le jeu `data/sample_*.csv` est entièrement fictif. Il permet de vérifier l’application sans réseau :
+`requirements.txt` locks all direct and transitive versions for reproducible
+Python 3.11 and 3.12 installations. Direct dependency ranges are maintained in
+`requirements.in`. Regenerate the lock after changing those ranges or when
+preparing a controlled dependency update:
 
 ```bash
-python run_snapshot.py --mode sample --universe all
-python run_snapshot.py --mode sample --universe all --basis total
+uv pip compile requirements.in --universal --python-version 3.11 \
+  --upgrade -o requirements.txt
+python -m pytest
+```
+
+## First run
+
+Create live snapshots, start the API, and then start the dashboard:
+
+```bash
+python run_snapshot.py --universe all
 python -m uvicorn api:app --reload
 ```
 
-Dans un second terminal :
+In a second terminal:
 
 ```bash
 python -m streamlit run dashboard.py
 ```
 
-- API interactive : `http://127.0.0.1:8000/docs`
-- Dashboard : `http://localhost:8501`
+- Interactive API: `http://127.0.0.1:8000/docs`
+- Dashboard: `http://localhost:8501`
 
-## Utilisation des sources externes
+The dashboard provides matching segmented controls for:
+
+- `Non-UCITS` or `UCITS`
+- `Free Float` or `Total`
+
+The Refresh button updates the selected universe and capitalization basis using
+live data only.
+
+## Live-source usage
 
 ```bash
-# Les deux univers ; échec explicite si aucune chaîne live n'aboutit
-python run_snapshot.py --mode live --universe all
+# Both universes; fails explicitly if no provider chain succeeds
+python run_snapshot.py --universe all
 
-# Même univers, contrefactuel prix × actions en circulation
-python run_snapshot.py --mode live --universe all --basis total
+# Both universes using price x shares outstanding
+python run_snapshot.py --universe all --basis total
 
-# Mode recommandé pour le MVP : live, puis fallback fictif clairement marqué
-python run_snapshot.py --mode auto --universe all
-
-# Un CSV local doit être rattaché explicitement à un univers
-python run_snapshot.py --mode live --universe non_ucits --holdings-csv chemin/holdings_qqq.csv
-python run_snapshot.py --mode live --universe ucits --holdings-csv chemin/holdings_cndx.csv
+# Attach an explicit local holdings CSV to one universe
+python run_snapshot.py --universe non_ucits --holdings-csv path/holdings_qqq.csv
+python run_snapshot.py --universe ucits --holdings-csv path/holdings_cndx.csv
 ```
 
-Toutes les URLs sont configurables dans `.env`. Un CSV compatible doit contenir au minimum un ticker et un poids, avec idéalement le nom et la classe d’actif.
+All URLs are configurable through `.env`. A compatible CSV must contain at least
+a ticker and weight, and should ideally include company name and asset class.
+There is no fallback to synthetic data.
 
 ## API
 
@@ -144,31 +293,34 @@ GET  /api/components?universe=ucits&weighting_basis=total&ranking=contributors&l
 POST /api/recompute
 ```
 
-Exemple de recalcul :
+Example recomputation:
 
 ```bash
 curl -X POST http://127.0.0.1:8000/api/recompute \
   -H "Content-Type: application/json" \
-  -d '{"mode":"auto","universe":"all","weighting_basis":"total"}'
+  -d '{"universe":"all","weighting_basis":"total"}'
 ```
 
-`ranking` accepte `all`, `overweights`, `underweights` ou `contributors`.
+`ranking` accepts `all`, `overweights`, `underweights`, or `contributors`.
 
-## Snapshot quotidien
+## Daily snapshots
 
-Le processus intégré attend l’heure locale choisie et reste actif :
+The built-in loop waits until the selected local time and remains active:
 
 ```bash
-python run_snapshot.py --mode auto --universe all --daily --at 18:00
+python run_snapshot.py --universe all --daily --at 18:00
 ```
 
-En production, il est préférable de faire exécuter la commande ponctuelle par le planificateur du système :
+In production, prefer a system scheduler for the one-off command:
 
 ```cron
-0 18 * * 1-5 cd /chemin/ndx-wdi && .venv/bin/python run_snapshot.py --mode auto --universe all
+0 18 * * 1-5 cd /path/to/ndx-wdi && .venv/bin/python run_snapshot.py --universe all
 ```
 
-Sous Windows, créer une tâche dans le Planificateur de tâches qui lance `C:\chemin\.venv\Scripts\python.exe` avec les arguments `run_snapshot.py --mode auto` et le dossier du projet comme répertoire de démarrage.
+On Windows, create a Task Scheduler entry that runs
+`C:\path\.venv\Scripts\python.exe` with the arguments
+`run_snapshot.py --universe all` and uses the project directory as its working
+directory.
 
 ## Tests
 
@@ -176,4 +328,8 @@ Sous Windows, créer une tâche dans le Planificateur de tâches qui lance `C:\c
 python -m pytest
 ```
 
-Le cas de référence vérifie `A=50 %`, `B=30 %`, `C=20 %` contre `60 %`, `25 %`, `15 %`, soit `NDX_WDI = 10`. Les tests couvrent aussi la normalisation, les flottants/prix manquants, la somme des distributions, les contributions, SQLite et les quatre routes API.
+The reference case compares published weights `A=50%`, `B=30%`, and `C=20%`
+with capitalization weights `60%`, `25%`, and `15%`, producing `NDX_WDI = 10`.
+The suite also covers normalization, missing price/share data, distribution sums,
+component contributions, SQLite persistence, provider validation, and all API
+routes.

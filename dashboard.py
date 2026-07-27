@@ -2,19 +2,350 @@
 
 from __future__ import annotations
 
+import html
 import os
 
 import pandas as pd
-import plotly.express as px
+import plotly.graph_objects as go
 import streamlit as st
 from dotenv import load_dotenv
 
 from database import SnapshotDatabase
-from snapshot_service import recompute_all_snapshots, recompute_snapshot
+from snapshot_service import recompute_snapshot
 
 
 load_dotenv()
-st.set_page_config(page_title="NDX Weight Distortion Index", page_icon="⚖️", layout="wide")
+st.set_page_config(
+    page_title="NDX Weight Distortion Index",
+    page_icon=":material/analytics:",
+    layout="wide",
+)
+
+if "dark_mode" not in st.session_state:
+    st.session_state["dark_mode"] = False
+
+IS_DARK_MODE = bool(st.session_state["dark_mode"])
+THEME = (
+    {
+        "bg": "#101519",
+        "surface": "#171e23",
+        "ink": "#edf2f5",
+        "muted": "#9cabb5",
+        "line": "#303b43",
+        "soft": "#202a30",
+        "chart_font": "#cdd7dd",
+        "chart_grid": "#2a343b",
+        "chart_zero": "#5d6a73",
+        "marker_outline": "#101519",
+        "note_ink": "#f0c36c",
+        "note_bg": "#2a2418",
+        "note_line": "#5e4b26",
+    }
+    if IS_DARK_MODE
+    else {
+        "bg": "#f7f8fa",
+        "surface": "#ffffff",
+        "ink": "#1b2733",
+        "muted": "#687582",
+        "line": "#dce2e7",
+        "soft": "#eef2f4",
+        "chart_font": "#33414d",
+        "chart_grid": "#e7ebee",
+        "chart_zero": "#aab4bd",
+        "marker_outline": "#ffffff",
+        "note_ink": "#76561f",
+        "note_bg": "#fff6df",
+        "note_line": "#efd8a5",
+    }
+)
+
+dashboard_css = """
+    <style>
+    :root {
+        --ndx-bg: __BG__;
+        --ndx-surface: __SURFACE__;
+        --ndx-ink: __INK__;
+        --ndx-muted: __MUTED__;
+        --ndx-line: __LINE__;
+        --ndx-soft: __SOFT__;
+        --ndx-teal: #177e78;
+        --ndx-blue: #3f7dc0;
+        --ndx-coral: #d45a57;
+        --ndx-amber: #d69a2d;
+        --ndx-green: #268463;
+    }
+
+    html, body, .stApp,
+    [data-testid="stAppViewContainer"],
+    [data-testid="stMain"] {
+        background: var(--ndx-bg) !important;
+        color: var(--ndx-ink) !important;
+    }
+
+    [data-testid="stHeader"] {
+        background: transparent !important;
+    }
+
+    .block-container {
+        max-width: 1480px;
+        padding-top: 1.35rem;
+        padding-bottom: 2.5rem;
+    }
+
+    h1, h2, h3 {
+        color: var(--ndx-ink);
+        letter-spacing: 0;
+    }
+
+    h1 {
+        font-size: 2rem !important;
+        line-height: 1.15 !important;
+        margin-bottom: 0.15rem !important;
+    }
+
+    h3 {
+        font-size: 1.05rem !important;
+        line-height: 1.3 !important;
+        margin-top: 0.2rem !important;
+        margin-bottom: 0.1rem !important;
+    }
+
+    [data-testid="stCaptionContainer"] p {
+        color: var(--ndx-muted);
+        font-size: 0.82rem;
+        line-height: 1.45;
+    }
+
+    [data-testid="stMarkdownContainer"] p,
+    [data-testid="stWidgetLabel"] p,
+    [data-testid="stExpander"] summary,
+    [data-testid="stTabs"] button {
+        color: var(--ndx-ink);
+    }
+
+    [data-testid="stSegmentedControl"] button,
+    [data-testid="stButton"] button,
+    [data-testid="stPopover"] button {
+        border-radius: 6px !important;
+    }
+
+    [data-testid="stBaseButton-secondary"],
+    [data-testid="stPopoverButton"],
+    button[role="radio"][aria-checked="false"] {
+        color: var(--ndx-ink) !important;
+        background: var(--ndx-surface) !important;
+        border-color: var(--ndx-line) !important;
+    }
+
+    [data-testid="stBaseButton-secondary"] *,
+    [data-testid="stPopoverButton"] *,
+    button[role="radio"][aria-checked="false"] * {
+        color: var(--ndx-ink) !important;
+    }
+
+    [data-testid="stButton"] button {
+        min-height: 2.35rem;
+    }
+
+    [data-testid="stAlert"] {
+        border-radius: 6px;
+        padding: 0.55rem 0.75rem;
+    }
+
+    [data-testid="stDataFrame"] {
+        border: 1px solid var(--ndx-line);
+        border-radius: 6px;
+        overflow: hidden;
+        background: #ffffff;
+        filter: __DATAFRAME_FILTER__;
+        color-scheme: __COLOR_SCHEME__;
+    }
+
+    [data-testid="stExpander"] {
+        border-color: var(--ndx-line);
+        border-radius: 6px;
+        background: var(--ndx-surface);
+    }
+
+    .ndx-score-strip {
+        display: grid;
+        grid-template-columns: minmax(210px, 1.6fr) repeat(4, minmax(105px, 0.75fr));
+        align-items: center;
+        gap: 0;
+        margin: 0.55rem 0 0.35rem;
+        padding: 0.8rem 0;
+        border-top: 1px solid var(--ndx-line);
+        border-bottom: 1px solid var(--ndx-line);
+    }
+
+    .ndx-score-main {
+        padding: 0.1rem 1.2rem 0.1rem 0;
+    }
+
+    .ndx-eyebrow {
+        color: var(--ndx-teal);
+        font-size: 0.7rem;
+        font-weight: 700;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+    }
+
+    .ndx-score-value {
+        color: var(--ndx-ink);
+        font-size: 3rem;
+        font-weight: 680;
+        line-height: 1;
+        margin: 0.12rem 0 0.2rem;
+    }
+
+    .ndx-score-reading {
+        display: flex;
+        align-items: flex-end;
+        gap: 0.9rem;
+    }
+
+    .ndx-score-meaning {
+        max-width: 250px;
+        padding-bottom: 0.24rem;
+        color: var(--ndx-muted);
+        font-size: 0.76rem;
+        line-height: 1.35;
+    }
+
+    .ndx-score-meaning strong {
+        color: var(--ndx-ink);
+        font-weight: 650;
+    }
+
+    .ndx-score-context {
+        color: var(--ndx-muted);
+        font-size: 0.78rem;
+    }
+
+    .ndx-stat {
+        min-height: 3.2rem;
+        padding: 0.15rem 0.9rem;
+        border-left: 1px solid var(--ndx-line);
+    }
+
+    .ndx-stat-label {
+        color: var(--ndx-muted);
+        font-size: 0.68rem;
+        line-height: 1.2;
+        text-transform: uppercase;
+    }
+
+    .ndx-stat-value {
+        color: var(--ndx-ink);
+        font-size: 1.05rem;
+        font-weight: 620;
+        line-height: 1.5;
+    }
+
+    .ndx-source-row {
+        color: var(--ndx-muted);
+        font-size: 0.78rem;
+        line-height: 2.2rem;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+    }
+
+    .ndx-status-dot {
+        display: inline-block;
+        width: 0.48rem;
+        height: 0.48rem;
+        margin-right: 0.4rem;
+        border-radius: 50%;
+        background: var(--ndx-green);
+        box-shadow: 0 0 0 3px rgba(38, 132, 99, 0.12);
+    }
+
+    .ndx-status-dot.partial {
+        background: var(--ndx-amber);
+        box-shadow: 0 0 0 3px rgba(214, 154, 45, 0.12);
+    }
+
+    .ndx-inline-note {
+        display: inline-block;
+        color: __NOTE_INK__;
+        background: __NOTE_BG__;
+        border: 1px solid __NOTE_LINE__;
+        border-radius: 999px;
+        padding: 0.2rem 0.55rem;
+        font-size: 0.72rem;
+        line-height: 1.25;
+    }
+
+    .ndx-section-rule {
+        height: 1px;
+        margin: 0.8rem 0 1rem;
+        background: var(--ndx-line);
+    }
+
+    @media (max-width: 900px) {
+        .block-container {
+            padding-top: 0.9rem;
+        }
+
+        .st-key-theme_toggle {
+            display: flex;
+            justify-content: flex-end;
+        }
+
+        .st-key-theme_toggle button {
+            width: 2.5rem !important;
+            min-width: 2.5rem !important;
+            padding: 0.35rem !important;
+        }
+
+        .st-key-theme_toggle button p {
+            display: none;
+        }
+
+        .ndx-score-strip {
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+        }
+
+        .ndx-score-main {
+            grid-column: 1 / -1;
+            padding-bottom: 0.8rem;
+        }
+
+        .ndx-stat {
+            border-left: 0;
+            border-top: 1px solid var(--ndx-line);
+            padding: 0.6rem 0.2rem;
+        }
+
+        .ndx-score-value {
+            font-size: 2.55rem;
+        }
+
+        .ndx-score-meaning {
+            max-width: 210px;
+            font-size: 0.72rem;
+        }
+    }
+    </style>
+    """
+for token, value in {
+    "__BG__": THEME["bg"],
+    "__SURFACE__": THEME["surface"],
+    "__INK__": THEME["ink"],
+    "__MUTED__": THEME["muted"],
+    "__LINE__": THEME["line"],
+    "__SOFT__": THEME["soft"],
+    "__NOTE_INK__": THEME["note_ink"],
+    "__NOTE_BG__": THEME["note_bg"],
+    "__NOTE_LINE__": THEME["note_line"],
+    "__DATAFRAME_FILTER__": (
+        "invert(0.88) hue-rotate(180deg)" if IS_DARK_MODE else "none"
+    ),
+    "__COLOR_SCHEME__": "dark" if IS_DARK_MODE else "light",
+}.items():
+    dashboard_css = dashboard_css.replace(token, value)
+st.html(dashboard_css)
 
 
 def _database() -> SnapshotDatabase:
@@ -22,128 +353,508 @@ def _database() -> SnapshotDatabase:
 
 
 def _percent(value: float | None) -> str:
-    return "—" if value is None or pd.isna(value) else f"{value:.2%}"
+    return "n/a" if value is None or pd.isna(value) else f"{value:.2%}"
+
+
+def _display_date(value: object) -> str:
+    if value is None or str(value).strip() == "":
+        return "not published"
+    parsed = pd.to_datetime(value, errors="coerce")
+    if pd.isna(parsed):
+        return str(value)
+    return parsed.strftime("%b %d, %Y")
 
 
 def _component_table(frame: pd.DataFrame, weighting_basis: str) -> pd.DataFrame:
     columns = [
         "ticker",
         "company_name",
+        "security_type",
         "actual_weight",
         "counterfactual_weight",
         "weight_delta",
         "weight_ratio",
         "distortion_contribution",
         "price",
-        "reference_shares",
+        "reference_source",
         "data_status",
     ]
+    if weighting_basis == "total":
+        columns.insert(-1, "reference_shares")
+    else:
+        columns[-1:-1] = ["acwi_weight", "acwi_listing"]
     result = frame.reindex(columns=columns).copy()
     for column in ["actual_weight", "counterfactual_weight", "weight_delta"]:
         result[column] = result[column].map(_percent)
     result["weight_ratio"] = result["weight_ratio"].map(
-        lambda value: "—" if pd.isna(value) else f"{value:.2f}x"
+        lambda value: "n/a" if pd.isna(value) else f"{value:.2f}x"
     )
     result["distortion_contribution"] = result["distortion_contribution"].map(
-        lambda value: "—" if pd.isna(value) else f"{value:.3f}"
+        lambda value: "n/a" if pd.isna(value) else f"{value:.3f}"
     )
     result["price"] = result["price"].map(
-        lambda value: "—" if pd.isna(value) else f"${value:,.2f}"
-    )
-    result["reference_shares"] = result["reference_shares"].map(
-        lambda value: "—" if pd.isna(value) else f"{value:,.0f}"
+        lambda value: "n/a" if pd.isna(value) else f"${value:,.2f}"
     )
     if weighting_basis == "total":
+        result["reference_shares"] = result["reference_shares"].map(
+            lambda value: "n/a" if pd.isna(value) else f"{value:,.0f}"
+        )
         return result.rename(
             columns={
                 "counterfactual_weight": "total_cap_weight",
                 "reference_shares": "shares_outstanding",
             }
         )
-    return result.rename(
-        columns={
-            "counterfactual_weight": "float_weight",
-            "reference_shares": "float_shares",
-        }
+    result["acwi_weight"] = result["acwi_weight"].map(_percent)
+    return result.rename(columns={"counterfactual_weight": "float_weight"})
+
+
+def _render_method_help(weighting_basis: str) -> None:
+    label = "Free-float method" if weighting_basis == "float" else "Total-cap method"
+    with st.popover(label, icon=":material/help:", width="stretch"):
+        if weighting_basis == "float":
+            st.markdown(
+                """
+                **Primary reference:** official iShares ACWI holding market values.
+
+                ACWI matches are selected for Nasdaq-100 constituents and normalized
+                to 100%. ADR/ADS securities and ACWI absences use a calibrated
+                yfinance fallback. Each valid fallback is converted into ACWI
+                fund-value units with the median conversion ratio from matched names.
+
+                Free-float adjustment is also used by major investable benchmarks such
+                as the [S&P 500](https://www.spglobal.com/spdji/en/methodology/article/sp-us-indices-methodology/)
+                and [MSCI World](https://www.msci.com/indexes/index/990100/msci-world-index).
+                """
+            )
+        else:
+            st.markdown(
+                """
+                **Counterfactual:** price multiplied by all shares outstanding.
+
+                This includes strategic holdings that may not be readily tradable.
+                The [Nasdaq Composite](https://www.nasdaq.com/newsroom/nasdaq-composite-vs-nasdaq-100-what-investors-should-know)
+                is a useful reference for total-capitalization weighting.
+                """
+            )
+        st.caption(
+            "The official Nasdaq-100 uses modified market capitalization with float "
+            "and concentration constraints. Neither comparison reproduces it exactly."
+        )
+
+
+def _render_score_strip(
+    snapshot: dict[str, object],
+    components: pd.DataFrame,
+    universe_label: str,
+    basis_label: str,
+) -> None:
+    weighting_basis = str(snapshot.get("weighting_basis") or "float")
+    score = float(snapshot["ndx_wdi"])
+    valid_fallbacks = int(
+        components["data_status"].astype("string").eq("valid_yfinance_fallback").sum()
+    )
+    if weighting_basis == "float":
+        fourth_label = "Fallbacks"
+        fourth_value = str(valid_fallbacks)
+        fifth_label = "Reference gaps"
+        fifth_value = str(snapshot["missing_reference_shares_count"])
+    else:
+        fourth_label = "Missing shares"
+        fourth_value = str(snapshot["missing_reference_shares_count"])
+        fifth_label = "Missing prices"
+        fifth_value = str(snapshot["missing_price_count"])
+
+    st.html(
+        f"""
+        <div class="ndx-score-strip">
+          <div class="ndx-score-main">
+            <div class="ndx-eyebrow">Live NDX_WDI</div>
+            <div class="ndx-score-reading">
+              <div class="ndx-score-value">{score:.2f}</div>
+              <div class="ndx-score-meaning">
+                <strong>{score:.2f}% of index weight</strong> would need to be
+                reallocated to match the reference.
+              </div>
+            </div>
+            <div class="ndx-score-context">
+              {html.escape(universe_label)} | {html.escape(basis_label)}
+            </div>
+          </div>
+          <div class="ndx-stat">
+            <div class="ndx-stat-label">Coverage</div>
+            <div class="ndx-stat-value">{_percent(snapshot["coverage_ratio"])}</div>
+          </div>
+          <div class="ndx-stat">
+            <div class="ndx-stat-label">Constituents</div>
+            <div class="ndx-stat-value">{int(snapshot["constituent_count"])}</div>
+          </div>
+          <div class="ndx-stat">
+            <div class="ndx-stat-label">{fourth_label}</div>
+            <div class="ndx-stat-value">{fourth_value}</div>
+          </div>
+          <div class="ndx-stat">
+            <div class="ndx-stat-label">{fifth_label}</div>
+            <div class="ndx-stat-value">{fifth_value}</div>
+          </div>
+        </div>
+        """
     )
 
 
 def _render_source_status(snapshot: dict[str, object]) -> None:
-    message = (
-        f"Statut : **{snapshot['status']}** · Fonds de référence : "
-        f"**{snapshot.get('reference_fund') or '—'}** · Source : "
-        f"{snapshot.get('holdings_source') or '—'} · Holdings au : "
-        f"{snapshot.get('holdings_as_of') or 'date non publiée'} · Snapshot UTC : "
-        f"{snapshot['timestamp']}"
+    is_complete = snapshot["status"] == "complete"
+    status_label = "Complete live snapshot" if is_complete else "Partial live snapshot"
+    dot_class = "" if is_complete else " partial"
+    source_line = (
+        f"{status_label} | {snapshot.get('reference_fund') or 'No reference fund'} "
+        f"| holdings {_display_date(snapshot.get('holdings_as_of'))}"
     )
-    if snapshot["status"] == "complete":
-        st.success(message)
-    else:
-        st.warning(message)
-    if snapshot.get("source_failures"):
-        with st.expander("Sources précédentes rejetées"):
-            st.code(str(snapshot["source_failures"]))
+    status_columns = st.columns([4.7, 1.1], gap="small", vertical_alignment="center")
+    with status_columns[0]:
+        st.html(
+            f"""
+            <div class="ndx-source-row" title="{html.escape(source_line)}">
+              <span class="ndx-status-dot{dot_class}"></span>{html.escape(source_line)}
+            </div>
+            """
+        )
+    with status_columns[1]:
+        with st.popover(
+            "Data details",
+            icon=":material/database:",
+            width="stretch",
+        ):
+            st.markdown(
+                f"""
+                - **Status:** `{snapshot["status"]}`
+                - **Reference fund:** {snapshot.get("reference_fund") or "n/a"}
+                - **Holdings source:** `{snapshot.get("holdings_source") or "n/a"}`
+                - **Holdings date:** {_display_date(snapshot.get("holdings_as_of"))}
+                - **ACWI date:** {_display_date(snapshot.get("reference_data_as_of"))}
+                - **Snapshot UTC:** `{snapshot["timestamp"]}`
+                """
+            )
+            if snapshot.get("source_failures"):
+                st.caption("Rejected preceding sources")
+                st.code(str(snapshot["source_failures"]))
+
+    invalid_count = int(snapshot.get("invalid_float_count", 0))
+    if invalid_count:
+        st.html(
+            f"""
+            <span class="ndx-inline-note">
+              {invalid_count} inconsistent yfinance fallback excluded
+            </span>
+            """
+        )
 
 
-def _render_universe(database: SnapshotDatabase, snapshot: dict[str, object]) -> None:
-    components = pd.DataFrame(database.get_components(int(snapshot["snapshot_id"])))
-    weighting_basis = str(snapshot.get("weighting_basis") or "float")
-    metrics = st.columns(6 if weighting_basis == "float" else 5)
-    metrics[0].metric("NDX_WDI", f"{snapshot['ndx_wdi']:.2f}")
-    metrics[1].metric("Couverture", _percent(snapshot["coverage_ratio"]))
-    metrics[2].metric("Titres", int(snapshot["constituent_count"]))
-    if weighting_basis == "float":
-        metrics[3].metric(
-            "Flottants manquants", int(snapshot["missing_reference_shares_count"])
-        )
-        metrics[4].metric("Flottants invalides", int(snapshot.get("invalid_float_count", 0)))
-        metrics[5].metric("Prix manquants", int(snapshot["missing_price_count"]))
-    else:
-        metrics[3].metric(
-            "Actions totales manquantes", int(snapshot["missing_reference_shares_count"])
-        )
-        metrics[4].metric("Prix manquants", int(snapshot["missing_price_count"]))
-    _render_source_status(snapshot)
-    if weighting_basis == "float" and snapshot.get("invalid_float_count", 0):
-        st.warning(
-            "Les flottants incohérents avec les actions en circulation ou la capitalisation "
-            "totale sont exclus sans être remplacés."
-        )
-
-    valid = components.loc[
+def _valid_components(components: pd.DataFrame) -> pd.DataFrame:
+    return components.loc[
         components["data_status"].astype("string").str.startswith("valid", na=False)
     ].copy()
-    if not valid.empty:
-        chart_frame = valid.nlargest(20, "distortion_contribution").sort_values("weight_delta")
-        chart_frame["direction"] = chart_frame["weight_delta"].map(
-            lambda value: "Surpondération" if value >= 0 else "Sous-pondération"
-        )
-        figure = px.bar(
-            chart_frame,
-            x="weight_delta",
-            y="ticker",
-            orientation="h",
-            color="direction",
-            color_discrete_map={"Surpondération": "#c44e52", "Sous-pondération": "#4c72b0"},
-            labels={"weight_delta": "Écart de poids", "ticker": "Titre"},
-            title="Principaux écarts de pondération",
-            hover_data={
-                "actual_weight": ":.2%",
-                "counterfactual_weight": ":.2%",
-                "weight_delta": ":.2%",
-            },
-        )
-        figure.update_layout(legend_title_text="", xaxis_tickformat=".1%")
-        st.plotly_chart(figure, width="stretch")
 
-    st.subheader("Classements")
+
+def _render_weight_difference_chart(components: pd.DataFrame) -> None:
+    valid = _valid_components(components)
+    st.subheader("Largest weight differences")
+    st.caption("Published ETF weight minus the selected capitalization reference.")
+    if valid.empty:
+        st.info("No valid constituent differences are available.")
+        return
+
+    chart_frame = (
+        valid.nlargest(15, "distortion_contribution")
+        .sort_values("weight_delta")
+        .copy()
+    )
+    colors = chart_frame["weight_delta"].map(
+        lambda value: "#d45a57" if value >= 0 else "#3f7dc0"
+    )
+    custom_data = chart_frame[
+        ["actual_weight", "counterfactual_weight", "distortion_contribution"]
+    ].to_numpy()
+    figure = go.Figure(
+        go.Bar(
+            x=chart_frame["weight_delta"],
+            y=chart_frame["ticker"],
+            orientation="h",
+            marker={"color": colors, "line": {"width": 0}},
+            customdata=custom_data,
+            hovertemplate=(
+                "<b>%{y}</b><br>"
+                "Weight difference: %{x:.2%}<br>"
+                "Published weight: %{customdata[0]:.2%}<br>"
+                "Reference weight: %{customdata[1]:.2%}<br>"
+                "WDI contribution: %{customdata[2]:.2f}"
+                "<extra></extra>"
+            ),
+        )
+    )
+    figure.add_vline(x=0, line_width=1, line_color=THEME["chart_zero"])
+    figure.update_layout(
+        template="plotly_dark" if IS_DARK_MODE else "plotly_white",
+        height=430,
+        margin={"l": 8, "r": 12, "t": 10, "b": 35},
+        showlegend=False,
+        bargap=0.28,
+        barcornerradius=6,
+        paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor="rgba(0,0,0,0)",
+        font={"color": THEME["chart_font"], "size": 11},
+        xaxis={
+            "title": None,
+            "tickformat": ".1%",
+            "gridcolor": THEME["chart_grid"],
+            "zeroline": False,
+        },
+        yaxis={"title": None, "showgrid": False},
+    )
+    st.plotly_chart(figure, width="stretch", config={"displayModeBar": False})
+
+
+def _load_quarterly_history() -> pd.DataFrame:
+    history_path = os.getenv(
+        "NDX_QUARTERLY_HISTORY_PATH",
+        "data/edgar_quarterly_history.csv",
+    )
+    if not os.path.exists(history_path):
+        return pd.DataFrame()
+    history = pd.read_csv(history_path)
+    required = {
+        "report_date",
+        "ndx_wdi",
+        "ndx_wdi_raw",
+        "coverage_ratio",
+        "matched_count",
+        "estimated_count",
+        "excluded_non_comparable_count",
+        "rebalance_type",
+    }
+    if required.difference(history.columns):
+        return pd.DataFrame()
+    history["report_date"] = pd.to_datetime(history["report_date"], errors="coerce")
+    return history.dropna(subset=["report_date", "ndx_wdi"]).sort_values(
+        "report_date"
+    )
+
+
+def _render_history_help() -> None:
+    with st.popover("History method", icon=":material/help:", width="stretch"):
+        st.markdown(
+            """
+            One observation is retained per public quarter. QQQ and SPGM positions
+            are matched by exact CUSIP. Missing comparable SPGM weights are estimated
+            from the median observed overweight ratio; ADR and listing-form mismatches
+            remain excluded.
+
+            The quarterly series and the live point use different reference sources:
+            SEC-filed SPGM for history and the current iShares ACWI portfolio for live
+            monitoring.
+            """
+        )
+        st.caption(
+            "Diamond markers identify annual December reconstitutions. The star "
+            "identifies the July 2023 special rebalance."
+        )
+
+
+def _render_quarterly_history(snapshot: dict[str, object]) -> None:
+    history = _load_quarterly_history()
+    header_columns = st.columns([3.5, 1.1], gap="small", vertical_alignment="bottom")
+    with header_columns[0]:
+        st.subheader("Quarterly history and live reading")
+        st.caption("Corrected QQQ/SPGM filings, extended with the current ACWI reading.")
+    with header_columns[1]:
+        _render_history_help()
+
+    if history.empty:
+        st.info(
+            "Quarterly SEC history is unavailable. Run "
+            "`python run_quarterly_history.py` to rebuild it."
+        )
+        return
+
+    custom_data = history[
+        [
+            "ndx_wdi_raw",
+            "coverage_ratio",
+            "matched_count",
+            "estimated_count",
+            "excluded_non_comparable_count",
+        ]
+    ].to_numpy()
+    figure = go.Figure()
+    figure.add_trace(
+        go.Scatter(
+            x=history["report_date"],
+            y=history["ndx_wdi"],
+            mode="lines+markers",
+            name="Quarterly SEC",
+            line={"color": "#177e78", "width": 2.4},
+            marker={
+                "size": 5.5,
+                "color": THEME["marker_outline"],
+                "line": {"color": "#177e78", "width": 1.5},
+            },
+            customdata=custom_data,
+            hovertemplate=(
+                "<b>%{x|%b %Y}</b><br>"
+                "Corrected NDX_WDI: %{y:.2f}<br>"
+                "Matched-only NDX_WDI: %{customdata[0]:.2f}<br>"
+                "QQQ weight observed: %{customdata[1]:.1%}<br>"
+                "Matched / estimated: %{customdata[2]:.0f} / %{customdata[3]:.0f}<br>"
+                "Non-comparable exclusions: %{customdata[4]:.0f}"
+                "<extra></extra>"
+            ),
+        )
+    )
+
+    annual = history.loc[
+        history["rebalance_type"].eq("annual_reconstitution")
+    ]
+    figure.add_trace(
+        go.Scatter(
+            x=annual["report_date"],
+            y=annual["ndx_wdi"],
+            mode="markers",
+            showlegend=False,
+            marker={
+                "symbol": "diamond",
+                "size": 8,
+                "color": "#d69a2d",
+                "line": {"color": THEME["marker_outline"], "width": 1},
+            },
+            hovertemplate=(
+                "<b>Annual reconstitution</b><br>"
+                "%{x|%b %Y}<br>NDX_WDI: %{y:.2f}<extra></extra>"
+            ),
+        )
+    )
+
+    special = history.loc[history["rebalance_type"].eq("special_rebalance")]
+    figure.add_trace(
+        go.Scatter(
+            x=special["report_date"],
+            y=special["ndx_wdi"],
+            mode="markers",
+            showlegend=False,
+            marker={
+                "symbol": "star",
+                "size": 12,
+                "color": "#d45a57",
+                "line": {"color": THEME["marker_outline"], "width": 1},
+            },
+            hovertemplate=(
+                "<b>2023 special rebalance</b><br>"
+                "%{x|%b %Y}<br>NDX_WDI: %{y:.2f}<extra></extra>"
+            ),
+        )
+    )
+
+    live_date = pd.to_datetime(snapshot["timestamp"], errors="coerce")
+    if pd.isna(live_date):
+        live_date = pd.Timestamp.now()
+    if getattr(live_date, "tzinfo", None) is not None:
+        live_date = live_date.tz_localize(None)
+    live_score = float(snapshot["ndx_wdi"])
+    last_history = history.iloc[-1]
+    figure.add_trace(
+        go.Scatter(
+            x=[last_history["report_date"], live_date],
+            y=[last_history["ndx_wdi"], live_score],
+            mode="lines",
+            showlegend=False,
+            hoverinfo="skip",
+            line={"color": "#268463", "width": 1.6, "dash": "dot"},
+        )
+    )
+    figure.add_trace(
+        go.Scatter(
+            x=[live_date],
+            y=[live_score],
+            mode="markers",
+            name="Live ACWI",
+            marker={
+                "size": 11,
+                "color": "#268463",
+                "line": {"color": THEME["marker_outline"], "width": 2},
+            },
+            customdata=[
+                [
+                    snapshot.get("coverage_ratio"),
+                    snapshot.get("reference_fund"),
+                    snapshot.get("reference_data_as_of"),
+                ]
+            ],
+            hovertemplate=(
+                "<b>Live ACWI reading</b><br>"
+                "%{x|%b %d, %Y}<br>"
+                "NDX_WDI: %{y:.2f}<br>"
+                "Coverage: %{customdata[0]:.1%}<br>"
+                "Reference fund: %{customdata[1]}<br>"
+                "ACWI date: %{customdata[2]}<extra></extra>"
+            ),
+        )
+    )
+
+    all_scores = pd.concat(
+        [history["ndx_wdi"], pd.Series([live_score])],
+        ignore_index=True,
+    )
+    figure.add_vline(
+        x="2023-07-24",
+        line_width=1,
+        line_dash="dot",
+        line_color="rgba(212,90,87,0.45)",
+    )
+    figure.update_layout(
+        template="plotly_dark" if IS_DARK_MODE else "plotly_white",
+        height=430,
+        margin={"l": 10, "r": 15, "t": 10, "b": 35},
+        hovermode="closest",
+        legend={
+            "orientation": "h",
+            "yanchor": "bottom",
+            "y": 1.01,
+            "xanchor": "left",
+            "x": 0,
+            "font": {"size": 10},
+        },
+        paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor="rgba(0,0,0,0)",
+        font={"color": THEME["chart_font"], "size": 11},
+        xaxis={
+            "title": None,
+            "dtick": "M12",
+            "tickformat": "%Y",
+            "showgrid": False,
+        },
+        yaxis={
+            "title": "NDX_WDI",
+            "range": [
+                max(0.0, float(all_scores.min()) - 1.0),
+                float(all_scores.max()) + 1.0,
+            ],
+            "gridcolor": THEME["chart_grid"],
+            "zeroline": False,
+        },
+    )
+    st.plotly_chart(figure, width="stretch", config={"displayModeBar": False})
+
+
+def _render_rankings(components: pd.DataFrame, weighting_basis: str) -> None:
+    valid = _valid_components(components)
+    st.html('<div class="ndx-section-rule"></div>')
+    st.subheader("Explore constituents")
     overweights, underweights, contributors = st.tabs(
-        ["Surpondérations", "Sous-pondérations", "Contributeurs"]
+        ["Overweights", "Underweights", "WDI contributors"]
     )
     with overweights:
         st.dataframe(
             _component_table(
-                valid.loc[valid["weight_delta"] > 0].nlargest(15, "weight_delta"),
+                valid.loc[valid["weight_delta"] > 0].nlargest(12, "weight_delta"),
                 weighting_basis,
             ),
             hide_index=True,
@@ -152,7 +863,7 @@ def _render_universe(database: SnapshotDatabase, snapshot: dict[str, object]) ->
     with underweights:
         st.dataframe(
             _component_table(
-                valid.loc[valid["weight_delta"] < 0].nsmallest(15, "weight_delta"),
+                valid.loc[valid["weight_delta"] < 0].nsmallest(12, "weight_delta"),
                 weighting_basis,
             ),
             hide_index=True,
@@ -161,138 +872,134 @@ def _render_universe(database: SnapshotDatabase, snapshot: dict[str, object]) ->
     with contributors:
         st.dataframe(
             _component_table(
-                valid.nlargest(15, "distortion_contribution"), weighting_basis
+                valid.nlargest(12, "distortion_contribution"),
+                weighting_basis,
             ),
             hide_index=True,
             width="stretch",
         )
 
-    st.subheader("Tous les composants")
-    st.dataframe(
-        _component_table(components, weighting_basis),
-        hide_index=True,
-        width="stretch",
-    )
-    missing = components.loc[
-        ~components["data_status"].astype("string").str.startswith("valid", na=False)
-    ]
-    if not missing.empty:
-        st.subheader("Données exclues du calcul")
+    with st.expander(f"All constituents ({len(components)})"):
         st.dataframe(
-            _component_table(missing, weighting_basis),
+            _component_table(components, weighting_basis),
             hide_index=True,
             width="stretch",
         )
 
+    excluded = components.loc[
+        ~components["data_status"].astype("string").str.startswith("valid", na=False)
+    ]
+    if not excluded.empty:
+        with st.expander(f"Excluded data ({len(excluded)})"):
+            st.dataframe(
+                _component_table(excluded, weighting_basis),
+                hide_index=True,
+                width="stretch",
+            )
 
-st.title("Nasdaq-100 Weight Distortion Index")
-st.caption(
-    "Deux lectures séparées des pondérations publiées : ETF américains non-UCITS "
-    "(IQQ puis QQQ) et ETF européens UCITS (CNDX puis EQQQ ou sources configurées)."
+
+title_columns = st.columns([4.6, 0.8], gap="small", vertical_alignment="top")
+with title_columns[0]:
+    st.title("Nasdaq-100 Weight Distortion")
+    st.caption("Live ETF weights compared with a pure-capitalization reference.")
+with title_columns[1]:
+    theme_clicked = st.button(
+        "Light mode" if IS_DARK_MODE else "Night mode",
+        icon=":material/light_mode:" if IS_DARK_MODE else ":material/dark_mode:",
+        key="theme_toggle",
+        width="stretch",
+        help="Switch the dashboard color theme.",
+    )
+
+if theme_clicked:
+    st.session_state["dark_mode"] = not IS_DARK_MODE
+    st.rerun()
+
+control_columns = st.columns(
+    [1.05, 1.05, 0.48, 0.62],
+    gap="small",
+    vertical_alignment="bottom",
 )
+with control_columns[0]:
+    universe_label = st.segmented_control(
+        "Universe",
+        ["Non-UCITS", "UCITS"],
+        default="Non-UCITS",
+        required=True,
+        key="universe_selector",
+        width="stretch",
+    )
+with control_columns[1]:
+    basis_label = st.segmented_control(
+        "Capitalization basis",
+        ["Free float", "Total"],
+        default="Free float",
+        required=True,
+        key="basis_selector",
+        width="stretch",
+    )
 
-with st.sidebar:
-    st.header("Recalcul")
-    mode = st.selectbox("Mode", ["auto", "live", "sample"], index=0)
-    use_total_cap = st.toggle(
-        "Capitalisation cotée totale",
-        value=False,
-        help="Désactivé : prix × flottant. Activé : prix × actions en circulation.",
+universe = {"Non-UCITS": "non_ucits", "UCITS": "ucits"}[universe_label]
+weighting_basis = {"Free float": "float", "Total": "total"}[basis_label]
+
+with control_columns[2]:
+    recompute_clicked = st.button(
+        "Refresh",
+        icon=":material/refresh:",
+        type="primary",
+        width="stretch",
+        help=f"Refresh live data for {universe_label}.",
     )
-    weighting_basis = "total" if use_total_cap else "float"
-    if weighting_basis == "total":
-        st.caption("Contrefactuel : prix × `sharesOutstanding`, sans ajustement de flottant.")
-    else:
-        st.caption("Contrefactuel : prix × `floatShares`.")
-    target_label = st.selectbox("Univers", ["Tous", "Non-UCITS", "UCITS"], index=0)
-    target = {"Tous": "all", "Non-UCITS": "non_ucits", "UCITS": "ucits"}[target_label]
-    st.caption(
-        "Les pondérations sont lues telles que publiées. Une source incomplète ou un top 10 est rejeté."
-    )
-    if st.button("Recalculer maintenant", type="primary", width="stretch"):
-        with st.spinner("Récupération des holdings et calcul en cours…"):
-            try:
-                if target == "all":
-                    outcomes = recompute_all_snapshots(
-                        mode=mode,
-                        db_path=os.getenv("NDX_DB_PATH"),
-                        weighting_basis=weighting_basis,
-                    )
-                else:
-                    outcomes = [
-                        recompute_snapshot(
-                            mode=mode,
-                            db_path=os.getenv("NDX_DB_PATH"),
-                            universe=target,
-                            weighting_basis=weighting_basis,
-                        )
-                    ]
-                fallback_messages = [outcome.fallback_reason for outcome in outcomes if outcome.fallback_reason]
-                if fallback_messages:
-                    st.warning(" · ".join(fallback_messages))
-                else:
-                    st.success("Snapshot(s) enregistré(s).")
-                st.rerun()
-            except Exception as exc:
-                st.error(f"Recalcul impossible : {exc}")
+with control_columns[3]:
+    _render_method_help(weighting_basis)
+
+if recompute_clicked:
+    with st.spinner(f"Refreshing {universe_label}..."):
+        try:
+            recompute_snapshot(
+                db_path=os.getenv("NDX_DB_PATH"),
+                universe=universe,
+                weighting_basis=weighting_basis,
+            )
+            st.session_state["_refresh_notice"] = f"{universe_label} updated"
+            st.rerun()
+        except Exception as exc:
+            st.error(f"Refresh failed: {exc}")
 
 database = _database()
-snapshots = database.get_current_by_universe(weighting_basis)
-if not snapshots:
+snapshot = database.get_current(universe, weighting_basis)
+if snapshot is None:
     st.info(
-        "Aucun snapshot. Utilisez « Recalculer maintenant » ou lancez "
-        f"`python run_snapshot.py --mode sample --universe all --basis {weighting_basis}`."
+        f"No {universe_label} snapshot is available for the "
+        f"{basis_label.lower()} basis. Use Refresh to retrieve live data."
     )
     st.stop()
 
-summary_columns = st.columns(2)
-for column, universe, label in zip(
-    summary_columns,
-    ("non_ucits", "ucits"),
-    ("Non-UCITS", "UCITS"),
-):
-    with column:
-        with st.container(border=True):
-            st.subheader(label)
-            snapshot = snapshots.get(universe)
-            if snapshot:
-                st.metric("NDX_WDI", f"{snapshot['ndx_wdi']:.2f}")
-                st.write(
-                    f"Couverture {_percent(snapshot['coverage_ratio'])} · "
-                    f"Référence {snapshot.get('reference_fund') or '—'} · "
-                    f"Base {'capitalisation totale' if weighting_basis == 'total' else 'flottant'}"
-                )
-            else:
-                st.info("Pas encore de snapshot.")
+if notice := st.session_state.pop("_refresh_notice", None):
+    st.toast(notice, icon=":material/check_circle:")
 
-history = pd.DataFrame(database.get_history(limit=730, weighting_basis=weighting_basis))
-if not history.empty:
-    history = history.loc[
-        ~history["status"].astype("string").str.startswith("invalidated", na=False)
-    ].copy()
-if len(history) > 1:
-    history["Univers"] = history["universe"].map(
-        {"non_ucits": "Non-UCITS", "ucits": "UCITS"}
-    )
-    history = history.sort_values("timestamp")
-    trend = px.line(
-        history,
-        x="timestamp",
-        y="ndx_wdi",
-        color="Univers",
-        markers=True,
-        title="Historique comparé du NDX_WDI",
-    )
-    trend.update_layout(xaxis_title="Snapshot UTC", yaxis_title="NDX_WDI")
-    st.plotly_chart(trend, width="stretch")
+components = pd.DataFrame(database.get_components(int(snapshot["snapshot_id"])))
+_render_score_strip(
+    snapshot,
+    components,
+    universe_label,
+    basis_label,
+)
+_render_source_status(snapshot)
 
-available = [(key, label) for key, label in (("non_ucits", "Non-UCITS"), ("ucits", "UCITS")) if key in snapshots]
-tabs = st.tabs([label for _, label in available])
-for tab, (universe, _) in zip(tabs, available):
-    with tab:
-        _render_universe(database, snapshots[universe])
+show_history = universe == "non_ucits" and weighting_basis == "float"
+if show_history:
+    chart_columns = st.columns([0.93, 1.35], gap="large")
+    with chart_columns[0]:
+        _render_weight_difference_chart(components)
+    with chart_columns[1]:
+        _render_quarterly_history(snapshot)
+else:
+    _render_weight_difference_chart(components)
+
+_render_rankings(components, weighting_basis)
 
 st.caption(
-    "Les univers ne sont jamais fusionnés ni moyennés. Chaque score conserve le fonds de référence "
-    "et la source de pondérations effectivement retenus."
+    "Universes are never merged or averaged. Each score retains the reference "
+    "fund and holdings source that were actually used."
 )

@@ -1,44 +1,81 @@
-# Anomalie ASML dans les snapshots IQQ et CNDX
+# ASML anomaly in IQQ and CNDX snapshots
 
-## Résumé technique
+## Technical summary
 
-Le poids flottant d'ASML à 49,13 % ne provient pas des holdings IQQ ou CNDX. Les deux calculs ont réutilisé une valeur `floatShares` yfinance incohérente de 21 331 633 667 titres. Le contrôle ajouté exclut désormais cette observation sans lui substituer `sharesOutstanding`.
+ASML's 49.13% free-float weight did not originate in the IQQ or CNDX holdings.
+Both calculations reused an inconsistent yfinance `floatShares` value of
+21,331,633,667 shares. The added validation now excludes this observation
+without substituting `sharesOutstanding`.
 
-## Une même observation erronée contamine les deux univers
+## One erroneous observation affected both universes
 
-Les snapshots 10 (IQQ) et 11 (CNDX) enregistrent le même prix ASML de 1 747,58 USD, le même flottant de 21 331 633 667 titres et le même poids flottant de 49,13 %. Le poids publié d'ASML reste pourtant proche de 0,74 % dans les deux ETF. Cette symétrie localise le défaut dans la donnée de marché commune, et non dans les deux sources de holdings indépendantes.
+Snapshots 10 (IQQ) and 11 (CNDX) recorded the same ASML price of USD 1,747.58,
+the same float of 21,331,633,667 shares, and the same 49.13% free-float weight.
+ASML's published weight remained close to 0.74% in both ETFs. This symmetry
+located the defect in the shared market-data source rather than in the two
+independent holdings sources.
 
-## Les contrôles de cohérence invalident le flottant ASML
+## Consistency checks invalidate the ASML float
 
-La lecture live yfinance du 18 juillet 2026 fournit simultanément :
+The live yfinance response from July 18, 2026 provided all of the following:
 
-- `floatShares` : 21 331 633 667 ;
-- `sharesOutstanding` : 384 100 000 ;
-- `marketCap` : 671 245 467 648 USD ;
-- prix : 1 747,58 USD.
+- `floatShares`: 21,331,633,667
+- `sharesOutstanding`: 384,100,000
+- `marketCap`: USD 671,245,467,648
+- Price: USD 1,747.58
 
-Le flottant est 55,5 fois supérieur aux actions en circulation. Le produit prix × flottant implique environ 37,28 billions USD, également 55,5 fois la capitalisation totale publiée. Ces deux tests sont descriptifs : ils identifient une incohérence d'unité ou de fournisseur, sans déterminer la bonne valeur de flottant.
+The reported float was 55.5 times shares outstanding. Price multiplied by float
+implied approximately USD 37.28 trillion, also 55.5 times the published total
+market capitalization. These checks are descriptive: they identify a unit or
+provider inconsistency without determining the correct float value.
 
-## Méthode de rejet ajoutée
+## Added rejection rules
 
-Une observation est maintenant marquée `invalid_float_inconsistent` et exclue si le flottant dépasse les actions en circulation de plus de 10 %, ou si sa capitalisation implicite dépasse la capitalisation totale de plus de 25 %. Les marges tolèrent les décalages de date entre champs. Aucun fallback vers 100 % des actions en circulation n'est effectué.
+An observation is now marked `invalid_float_inconsistent` and excluded when its
+float exceeds shares outstanding by more than 10%, or when its implied
+free-float capitalization exceeds total market capitalization by more than 25%.
+The tolerances allow for reporting-date differences between fields. No fallback
+to 100% of shares outstanding is performed.
 
-Le même contrôle a révélé que yfinance publie un flottant Alphabet consolidé identique pour GOOG et GOOGL. Lorsque plusieurs classes présentent exactement le même flottant, des prix et capitalisations proches, et que ce flottant est cohérent avec la somme des actions en circulation des classes, le total est réparti au prorata des actions par classe. Les lignes restent distinctes et portent le statut `valid_shared_float_allocated`.
+The same validation showed that yfinance reports one identical consolidated
+Alphabet float for GOOG and GOOGL. When several classes have the exact same
+float, similar prices and market capitalizations, and a float consistent with
+their combined shares outstanding, the total is allocated in proportion to
+class-level shares outstanding. The rows remain separate and are marked
+`valid_shared_float_allocated`.
 
-## Limites et robustesse
+## Limitations and robustness
 
-Les contrôles dépendent encore de champs yfinance pouvant être absents ou datés. En leur absence, un flottant positif ne peut pas être validé par ces deux règles. Le `coverage_ratio`, le statut du snapshot et le nombre de flottants invalides doivent donc rester visibles.
+The checks still depend on yfinance fields that may be missing or stale. Without
+those fields, a positive float cannot be validated by these two rules.
+`coverage_ratio`, snapshot status, and the invalid-float count must therefore
+remain visible.
 
-## Validation de bout en bout
+## End-to-end validation
 
-Les snapshots live finaux 14 (IQQ) et 15 (CNDX) ont respectivement une couverture de 98,7870 % et 98,7877 %. ASML porte le statut `invalid_float_inconsistent` et aucun `float_weight`. GOOG et GOOGL portent `valid_shared_float_allocated`, restent deux lignes distinctes, et les poids réels comme flottants des 100 lignes valides somment chacun à 1. Le poids flottant maximal est AAPL à 14,04 %.
+Final live snapshots 14 (IQQ) and 15 (CNDX) had coverage of 98.7870% and
+98.7877%, respectively. ASML was marked `invalid_float_inconsistent` and had no
+`float_weight`. GOOG and GOOGL were marked `valid_shared_float_allocated`,
+remained separate rows, and both the published and free-float weights of the 100
+valid rows summed to 1. AAPL had the highest free-float weight at 14.04%.
 
-Les snapshots antérieurs contaminés ou produits pendant le diagnostic sont conservés dans SQLite avec le statut `invalidated_data_quality`, mais exclus du graphe historique du dashboard.
+Earlier contaminated snapshots and snapshots created during diagnosis were
+retained in SQLite with the `invalidated_data_quality` status, but excluded from
+the dashboard history chart.
 
-## Suite recommandée
+## Current ACWI-based treatment
 
-Conserver ASML comme ligne exclue tant qu'une source de flottant plus fiable n'est pas branchée, puis remplacer le provider de données de marché sans modifier le moteur de calcul.
+The primary free-float reference now comes from the official iShares ACWI
+holdings. ACWI lists `ASML` on Euronext Amsterdam, while the Nasdaq-100 ETF
+position is explicitly an ADR. The two rows must not be treated as the same
+security for float purposes.
 
-## Question ouverte
+`ASML`, `ARM`, and `PDD` are therefore labeled `ADR/ADS` and bypass ACWI. They
+use the calibrated yfinance fallback path. ASML remains excluded with
+`invalid_yfinance_fallback` because the inconsistency documented above is still
+present. This is explicit in each component's `security_type`,
+`reference_source`, and `data_status`.
 
-Une source gratuite stable fournissant le flottant ajusté des ADR et titres étrangers permettrait-elle de couvrir ASML sans introduire un remplacement automatique non auditable ?
+The remaining open data problem is a reliable ADR-specific float source. No
+primary-listing ACWI value or total shares-outstanding value is substituted
+automatically.

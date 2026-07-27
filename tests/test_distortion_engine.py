@@ -173,6 +173,53 @@ def test_total_basis_uses_outstanding_shares_and_ignores_missing_float():
     assert components.loc["C", "counterfactual_weight"] == 0.20
 
 
+def test_direct_acwi_weights_do_not_require_yfinance_prices_or_float_shares():
+    holdings = pd.DataFrame(
+        {
+            "ticker": ["A", "B", "ADR"],
+            "company_name": ["Alpha", "Beta", "ADR Depositary"],
+            "actual_weight": [0.50, 0.30, 0.20],
+        }
+    )
+    reference_data = pd.DataFrame(
+        {
+            "ticker": ["A", "B", "ADR"],
+            "price": [None, 10.0, 20.0],
+            "float_shares": [None, 100.0, 500.0],
+            "reference_weight_raw": [70.0, 30.0, None],
+            "reference_source": [
+                "ishares_acwi",
+                "ishares_acwi",
+                "yfinance_fallback",
+            ],
+            "security_type": ["Ordinary share", "Ordinary share", "ADR/ADS"],
+            "acwi_weight": [0.07, 0.03, None],
+            "acwi_listing": [
+                "United States / NASDAQ",
+                "United States / NASDAQ",
+                None,
+            ],
+            "reference_status": [
+                "valid_acwi",
+                "valid_acwi",
+                "invalid_yfinance_fallback",
+            ],
+        }
+    )
+
+    result = calculate_distortion(holdings, reference_data)
+    components = result.components.set_index("ticker")
+
+    assert math.isclose(result.coverage_ratio, 0.80)
+    assert result.missing_price_count == 0
+    assert result.invalid_float_count == 1
+    assert result.missing_reference_shares_count == 1
+    assert components.loc["A", "data_status"] == "valid_acwi"
+    assert components.loc["A", "counterfactual_weight"] == 0.70
+    assert components.loc["ADR", "security_type"] == "ADR/ADS"
+    assert components.loc["ADR", "data_status"] == "invalid_yfinance_fallback"
+
+
 def test_yfinance_cache_is_redirected_to_a_writable_local_directory(tmp_path, monkeypatch):
     captured: dict[str, str] = {}
     fake_yfinance = SimpleNamespace(
