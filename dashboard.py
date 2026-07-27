@@ -66,6 +66,10 @@ THEME = (
     }
 )
 
+NDX_ACTIVE_COLOR = "#df6b4f"
+SPX_ACTIVE_COLOR = "#2f5f98"
+ACTIVE_OVERLAP_COLOR = "#76558f"
+
 dashboard_css = """
     <style>
     :root {
@@ -965,7 +969,7 @@ def _active_share_extreme_figure(
             delta_column,
         )
         chart = chart.assign(display_delta=chart[delta_column])
-        color = "#177e78"
+        color = NDX_ACTIVE_COLOR
         difference_label = "NDX overweight"
     else:
         chart = frame.loc[frame[delta_column].lt(0)].nsmallest(
@@ -973,7 +977,7 @@ def _active_share_extreme_figure(
             delta_column,
         )
         chart = chart.assign(display_delta=-chart[delta_column])
-        color = "#3f7dc0"
+        color = SPX_ACTIVE_COLOR
         difference_label = "S&P 500 overweight"
     chart = chart.sort_values("display_delta")
     figure = go.Figure(
@@ -1111,11 +1115,10 @@ def _render_active_share_top_x(
     )
 
     chart = selected.sort_values(ndx_column).copy()
-    ndx_color = "#e76f51"
-    spx_color = "#4c78d0"
     chart["weight_advantage"] = (
         chart[ndx_column] - chart["spx_weight"]
     ).abs()
+    chart["shared_weight"] = chart[[ndx_column, "spx_weight"]].min(axis=1)
     chart["label_anchor"] = chart[[ndx_column, "spx_weight"]].max(axis=1)
     maximum_weight = float(chart["label_anchor"].max())
     label_offset = max(maximum_weight * 0.018, 0.00015)
@@ -1132,8 +1135,8 @@ def _render_active_share_top_x(
             y=chart["ticker"],
             orientation="h",
             name="S&P 500",
-            marker={"color": spx_color, "line": {"width": 0}},
-            opacity=0.5,
+            marker={"color": SPX_ACTIVE_COLOR, "line": {"width": 0}},
+            opacity=0.9,
             width=0.74,
             customdata=chart[[ndx_column]].to_numpy(),
             hovertemplate=(
@@ -1154,7 +1157,7 @@ def _render_active_share_top_x(
                 if rebalanced_view
                 else "Published NDX"
             ),
-            marker={"color": ndx_color, "line": {"width": 0}},
+            marker={"color": NDX_ACTIVE_COLOR, "line": {"width": 0}},
             opacity=0.8,
             width=0.42,
             customdata=chart[["spx_weight"]].to_numpy(),
@@ -1166,9 +1169,28 @@ def _render_active_share_top_x(
             ),
         )
     )
+    figure.add_trace(
+        go.Bar(
+            x=chart["shared_weight"],
+            y=chart["ticker"],
+            orientation="h",
+            name="Shared weight",
+            marker={"color": ACTIVE_OVERLAP_COLOR, "line": {"width": 0}},
+            opacity=0.94,
+            width=0.42,
+            customdata=chart[[ndx_column, "spx_weight"]].to_numpy(),
+            hovertemplate=(
+                "<b>%{y}</b><br>"
+                "Shared weight: %{x:.2%}<br>"
+                "NDX weight: %{customdata[0]:.2%}<br>"
+                "S&P 500 weight: %{customdata[1]:.2%}"
+                "<extra></extra>"
+            ),
+        )
+    )
     for dominant_index, color in [
-        ("NDX", ndx_color),
-        ("S&P 500", spx_color),
+        ("NDX", NDX_ACTIVE_COLOR),
+        ("S&P 500", SPX_ACTIVE_COLOR),
     ]:
         labels = chart.loc[
             chart["dominant_index"].eq(dominant_index)
@@ -1202,6 +1224,7 @@ def _render_active_share_top_x(
             "y": 1.01,
             "xanchor": "left",
             "x": 0,
+            "font": {"color": THEME["chart_font"], "size": 11},
         },
         paper_bgcolor="rgba(0,0,0,0)",
         plot_bgcolor="rgba(0,0,0,0)",
