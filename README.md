@@ -77,6 +77,66 @@ reallocated to move from one distribution to the other.
 The ETF holdings remain proxies for the index, and free market-data sources are
 not official or guaranteed. Local history starts with the first saved snapshot.
 
+## If rebalanced today
+
+Each live snapshot also calculates an `NDX_WDI` using the weights that the
+Nasdaq-100 would receive if its full annual December reconstitution used the
+snapshot date's prices and public inputs.
+The implementation follows the
+[Nasdaq-100 methodology effective May 1, 2026](https://indexes.nasdaqomx.com/docs/Methodology_NDX.pdf)
+and the official
+[Nasdaq index weight calculation rules](https://indexes.nasdaqomx.com/docs/Nasdaq_Index_Weight_Calculations.pdf).
+
+The daily pipeline:
+
+1. Builds the eligible universe from the official Nasdaq stock screener and
+   Nasdaq Trader symbol directory.
+2. Groups multiple share classes at company level with SEC CIK identifiers.
+3. Applies Nasdaq listing tier, non-financial, security-type, three-month ADVT,
+   seasoning, and the annual top-75/100/125 constituent-selection sequence.
+   Non-constituent ADRs are excluded unless primary-listing and listed
+   depositary-share inputs can be verified. Current membership is a conservative
+   public proxy for the prior-top-100 and post-reconstitution-addition flags.
+4. Recalculates every security's initial weight from modified capitalization:
+
+   ```text
+   acwi_conversion_scale =
+       90th percentile(ACWI_float_mass / listed_total_cap)
+
+   converted_total_mass = listed_total_cap x acwi_conversion_scale
+   modified_cap_mass = min(converted_total_mass, 3 x ACWI_float_mass)
+   ```
+
+   The upper-quantile calibration estimates the common fund-value scale from
+   ACWI names whose free float is close to 100%. Direct ACWI matches never use
+   yfinance `floatShares`. For ADR/ADS securities or absent ACWI positions,
+   yfinance free float remains a documented fallback.
+5. Aggregates securities by company and iterates the annual company constraints:
+   a company above 24% is reduced to at most 20%; if companies above 4.5%
+   aggregate to at least 48%, that cohort is reduced to 40%. Initial rank is
+   preserved.
+6. Returns to security weights and iterates the annual security constraints:
+   a security above 15% is reduced to at most 14%; if the five largest
+   securities aggregate to at least 40%, they are reduced to 38.5% and every
+   security outside the top five is capped at the lower of 4.4% or the
+   fifth-largest weight.
+7. Converts the final weights into the proportional Index Shares represented by
+   the simulation.
+8. Compares the resulting security weights with the selected free-float or
+   total-cap reference and recalculates `NDX_WDI`.
+
+The dashboard displays this score beside the live reading. Enabling **Show
+annual-reconstitution weights** switches the constituent rankings and main
+difference chart to simulated weights, adds signed changes versus current
+weights, and shows dedicated charts for the largest weight movements and
+simulated index entries/exits.
+
+The weight constraints are deterministic, but the composition result is a
+public-data simulation rather than an official Nasdaq review. Nasdaq retains
+discretion and does not publish every review input. The snapshot records
+`rebalance_status`, source, coverage, additions, removals, fallbacks, and notes
+so this limitation remains visible through SQLite and the API.
+
 ## Capitalization references
 
 The two dashboard bases are analytical comparison scenarios:
@@ -91,10 +151,10 @@ The two dashboard bases are analytical comparison scenarios:
   [Nasdaq Composite](https://www.nasdaq.com/newsroom/nasdaq-composite-vs-nasdaq-100-what-investors-should-know)
   is a useful reference for this approach.
 
-The official
-[Nasdaq-100 methodology](https://indexes.nasdaq.com/docs/Methodology_NDX.pdf)
-uses modified market capitalization with float and concentration constraints.
-Neither dashboard scenario is intended to reproduce that methodology exactly.
+The live free-float and total views remain analytical reference scenarios. The
+separate **If rebalanced today** calculation applies Nasdaq's modified
+capitalization and concentration rules before comparing those simulated index
+weights with the selected reference.
 
 ## Holdings sources and fallbacks
 
@@ -255,6 +315,17 @@ python -m streamlit run dashboard.py
 
 - Interactive API: `http://127.0.0.1:8000/docs`
 - Dashboard: `http://localhost:8501`
+
+Both services can instead be launched as detached background processes with
+the active Python environment:
+
+```bash
+python run_local.py
+```
+
+The launcher returns immediately, prints the process IDs, and skips services
+whose ports are already listening. It uses detached Windows processes or a new
+POSIX session as appropriate. Runtime output is written under `data/`.
 
 The dashboard provides matching segmented controls for:
 

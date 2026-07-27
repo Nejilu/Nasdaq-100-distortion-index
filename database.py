@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import math
 import sqlite3
 from contextlib import contextmanager
@@ -11,6 +12,7 @@ from typing import Any, Iterator
 import pandas as pd
 
 from distortion_engine import DistortionResult
+from nasdaq100_rebalance import RebalanceResult
 
 
 SCHEMA = """
@@ -35,6 +37,18 @@ CREATE TABLE IF NOT EXISTS snapshots (
     source_failures TEXT,
     holdings_source TEXT,
     market_data_source TEXT
+    ,rebalance_ndx_wdi REAL
+    ,rebalance_coverage_ratio REAL
+    ,rebalance_constituent_count INTEGER
+    ,rebalance_status TEXT
+    ,rebalance_method TEXT
+    ,rebalance_reference_date TEXT
+    ,rebalance_additions TEXT
+    ,rebalance_removals TEXT
+    ,rebalance_data_source TEXT
+    ,rebalance_acwi_conversion_scale REAL
+    ,rebalance_acwi_calibration_count INTEGER
+    ,rebalance_notes TEXT
 );
 
 CREATE TABLE IF NOT EXISTS snapshot_components (
@@ -55,6 +69,16 @@ CREATE TABLE IF NOT EXISTS snapshot_components (
     acwi_weight REAL,
     acwi_listing TEXT,
     data_status TEXT NOT NULL DEFAULT 'valid',
+    rebalance_weight REAL,
+    rebalance_reference_weight REAL,
+    rebalance_weight_change REAL,
+    rebalance_weight_delta REAL,
+    rebalance_distortion_contribution REAL,
+    rebalance_membership INTEGER,
+    rebalance_company_id TEXT,
+    modified_cap_ratio REAL,
+    modified_market_cap_mass REAL,
+    rebalance_input_status TEXT,
     PRIMARY KEY (snapshot_id, ticker),
     FOREIGN KEY (snapshot_id) REFERENCES snapshots(snapshot_id) ON DELETE CASCADE
 );
@@ -122,6 +146,18 @@ class SnapshotDatabase:
             "holdings_as_of": "TEXT",
             "reference_data_as_of": "TEXT",
             "source_failures": "TEXT",
+            "rebalance_ndx_wdi": "REAL",
+            "rebalance_coverage_ratio": "REAL",
+            "rebalance_constituent_count": "INTEGER",
+            "rebalance_status": "TEXT",
+            "rebalance_method": "TEXT",
+            "rebalance_reference_date": "TEXT",
+            "rebalance_additions": "TEXT",
+            "rebalance_removals": "TEXT",
+            "rebalance_data_source": "TEXT",
+            "rebalance_acwi_conversion_scale": "REAL",
+            "rebalance_acwi_calibration_count": "INTEGER",
+            "rebalance_notes": "TEXT",
         }
         for column, definition in additions.items():
             if column not in existing:
@@ -140,6 +176,16 @@ class SnapshotDatabase:
             "reference_source": "TEXT",
             "acwi_weight": "REAL",
             "acwi_listing": "TEXT",
+            "rebalance_weight": "REAL",
+            "rebalance_reference_weight": "REAL",
+            "rebalance_weight_change": "REAL",
+            "rebalance_weight_delta": "REAL",
+            "rebalance_distortion_contribution": "REAL",
+            "rebalance_membership": "INTEGER",
+            "rebalance_company_id": "TEXT",
+            "modified_cap_ratio": "REAL",
+            "modified_market_cap_mass": "REAL",
+            "rebalance_input_status": "TEXT",
         }
         for column, definition in additions.items():
             if column not in existing:
@@ -160,6 +206,7 @@ class SnapshotDatabase:
         holdings_as_of: str | None = None,
         reference_data_as_of: str | None = None,
         source_failures: str | None = None,
+        rebalance: RebalanceResult | None = None,
     ) -> int:
         with self.connect() as connection:
             cursor = connection.execute(
@@ -169,8 +216,14 @@ class SnapshotDatabase:
                     missing_float_count, invalid_float_count, missing_reference_shares_count,
                     missing_price_count, status, weighting_basis, universe,
                     reference_fund, holdings_as_of, reference_data_as_of, source_failures,
-                    holdings_source, market_data_source
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    holdings_source, market_data_source, rebalance_ndx_wdi,
+                    rebalance_coverage_ratio, rebalance_constituent_count,
+                    rebalance_status, rebalance_method, rebalance_reference_date,
+                    rebalance_additions, rebalance_removals, rebalance_data_source,
+                    rebalance_acwi_conversion_scale,
+                    rebalance_acwi_calibration_count, rebalance_notes
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                          ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     timestamp,
@@ -190,6 +243,22 @@ class SnapshotDatabase:
                     source_failures,
                     holdings_source,
                     market_data_source,
+                    _sql_value(rebalance.ndx_wdi) if rebalance else None,
+                    _sql_value(rebalance.coverage_ratio) if rebalance else None,
+                    rebalance.constituent_count if rebalance else None,
+                    rebalance.status if rebalance else None,
+                    rebalance.method if rebalance else None,
+                    rebalance.reference_date if rebalance else None,
+                    json.dumps(rebalance.additions) if rebalance else None,
+                    json.dumps(rebalance.removals) if rebalance else None,
+                    rebalance.data_source if rebalance else None,
+                    (
+                        _sql_value(rebalance.acwi_conversion_scale)
+                        if rebalance
+                        else None
+                    ),
+                    rebalance.acwi_calibration_count if rebalance else None,
+                    json.dumps(rebalance.notes) if rebalance else None,
                 ),
             )
             snapshot_id = int(cursor.lastrowid)
@@ -209,11 +278,35 @@ class SnapshotDatabase:
                         _sql_value(component.get("price")),
                         _sql_value(component.get("float_shares")),
                         _sql_value(component.get("reference_shares")),
-                        component.get("security_type", "Ordinary share"),
+                        (
+                            "Ordinary share"
+                            if pd.isna(component.get("security_type"))
+                            else component.get("security_type")
+                        ),
                         component.get("reference_source"),
                         _sql_value(component.get("acwi_weight")),
                         component.get("acwi_listing"),
-                        component.get("data_status", "valid"),
+                        (
+                            "valid"
+                            if pd.isna(component.get("data_status"))
+                            else component.get("data_status")
+                        ),
+                        _sql_value(component.get("rebalance_weight")),
+                        _sql_value(component.get("rebalance_reference_weight")),
+                        _sql_value(component.get("rebalance_weight_change")),
+                        _sql_value(component.get("rebalance_weight_delta")),
+                        _sql_value(
+                            component.get("rebalance_distortion_contribution")
+                        ),
+                        (
+                            int(bool(component.get("rebalance_membership")))
+                            if not pd.isna(component.get("rebalance_membership"))
+                            else None
+                        ),
+                        component.get("company_id"),
+                        _sql_value(component.get("modified_cap_ratio")),
+                        _sql_value(component.get("modified_market_cap_mass")),
+                        component.get("rebalance_input_status"),
                     )
                 )
             connection.executemany(
@@ -223,8 +316,13 @@ class SnapshotDatabase:
                     counterfactual_weight, weight_delta, weight_ratio,
                     distortion_contribution, price, float_shares, reference_shares,
                     security_type, reference_source, acwi_weight, acwi_listing,
-                    data_status
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    data_status, rebalance_weight, rebalance_reference_weight,
+                    rebalance_weight_change, rebalance_weight_delta,
+                    rebalance_distortion_contribution, rebalance_membership,
+                    rebalance_company_id, modified_cap_ratio,
+                    modified_market_cap_mass, rebalance_input_status
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                          ?, ?, ?, ?, ?, ?, ?)
                 """,
                 rows,
             )

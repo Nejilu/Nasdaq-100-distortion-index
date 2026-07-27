@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import html
+import json
 import os
 
+import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
@@ -169,7 +171,9 @@ dashboard_css = """
 
     .ndx-score-strip {
         display: grid;
-        grid-template-columns: minmax(210px, 1.6fr) repeat(4, minmax(105px, 0.75fr));
+        grid-template-columns:
+            minmax(250px, 1.5fr) minmax(180px, 1fr)
+            repeat(4, minmax(85px, 0.62fr));
         align-items: center;
         gap: 0;
         margin: 0.55rem 0 0.35rem;
@@ -226,6 +230,26 @@ dashboard_css = """
         min-height: 3.2rem;
         padding: 0.15rem 0.9rem;
         border-left: 1px solid var(--ndx-line);
+    }
+
+    .ndx-rebalance-score {
+        min-height: 4.5rem;
+        padding: 0.1rem 1rem;
+        border-left: 1px solid var(--ndx-line);
+    }
+
+    .ndx-rebalance-value {
+        color: var(--ndx-ink);
+        font-size: 2.15rem;
+        font-weight: 680;
+        line-height: 1.15;
+        margin-top: 0.12rem;
+    }
+
+    .ndx-rebalance-change {
+        color: var(--ndx-muted);
+        font-size: 0.72rem;
+        line-height: 1.35;
     }
 
     .ndx-stat-label {
@@ -312,6 +336,7 @@ dashboard_css = """
             padding-bottom: 0.8rem;
         }
 
+        .ndx-rebalance-score,
         .ndx-stat {
             border-left: 0;
             border-top: 1px solid var(--ndx-line);
@@ -356,6 +381,12 @@ def _percent(value: float | None) -> str:
     return "n/a" if value is None or pd.isna(value) else f"{value:.2%}"
 
 
+def _number(value: object, significant_digits: int = 4) -> str:
+    if value is None or pd.isna(value):
+        return "n/a"
+    return f"{float(value):.{significant_digits}g}"
+
+
 def _display_date(value: object) -> str:
     if value is None or str(value).strip() == "":
         return "not published"
@@ -365,7 +396,12 @@ def _display_date(value: object) -> str:
     return parsed.strftime("%b %d, %Y")
 
 
-def _component_table(frame: pd.DataFrame, weighting_basis: str) -> pd.DataFrame:
+def _component_table(
+    frame: pd.DataFrame,
+    weighting_basis: str,
+    *,
+    rebalanced_view: bool = False,
+) -> pd.DataFrame:
     columns = [
         "ticker",
         "company_name",
@@ -379,6 +415,9 @@ def _component_table(frame: pd.DataFrame, weighting_basis: str) -> pd.DataFrame:
         "reference_source",
         "data_status",
     ]
+    if rebalanced_view:
+        columns.insert(5, "rebalance_weight_change")
+        columns.insert(3, "rebalance_membership")
     if weighting_basis == "total":
         columns.insert(-1, "reference_shares")
     else:
@@ -386,6 +425,15 @@ def _component_table(frame: pd.DataFrame, weighting_basis: str) -> pd.DataFrame:
     result = frame.reindex(columns=columns).copy()
     for column in ["actual_weight", "counterfactual_weight", "weight_delta"]:
         result[column] = result[column].map(_percent)
+    if rebalanced_view:
+        result["rebalance_weight_change"] = result["rebalance_weight_change"].map(
+            lambda value: (
+                "n/a" if pd.isna(value) else f"{value:+.2%}"
+            )
+        )
+        result["rebalance_membership"] = result["rebalance_membership"].map(
+            {1: "Included", 0: "Removed", True: "Included", False: "Removed"}
+        ).fillna("n/a")
     result["weight_ratio"] = result["weight_ratio"].map(
         lambda value: "n/a" if pd.isna(value) else f"{value:.2f}x"
     )
@@ -399,14 +447,51 @@ def _component_table(frame: pd.DataFrame, weighting_basis: str) -> pd.DataFrame:
         result["reference_shares"] = result["reference_shares"].map(
             lambda value: "n/a" if pd.isna(value) else f"{value:,.0f}"
         )
-        return result.rename(
+        result = result.rename(
             columns={
                 "counterfactual_weight": "total_cap_weight",
                 "reference_shares": "shares_outstanding",
             }
         )
-    result["acwi_weight"] = result["acwi_weight"].map(_percent)
-    return result.rename(columns={"counterfactual_weight": "float_weight"})
+    else:
+        result["acwi_weight"] = result["acwi_weight"].map(_percent)
+        result = result.rename(columns={"counterfactual_weight": "float_weight"})
+    if rebalanced_view:
+        result = result.rename(
+            columns={
+                "actual_weight": "annual_reconstitution_weight",
+                "rebalance_weight_change": "change_vs_current",
+                "rebalance_membership": "annual_membership_status",
+            }
+        )
+    return result
+
+
+def _table_for_display(
+    frame: pd.DataFrame,
+    weighting_basis: str,
+    *,
+    rebalanced_view: bool,
+):
+    table = _component_table(
+        frame,
+        weighting_basis,
+        rebalanced_view=rebalanced_view,
+    )
+    if not rebalanced_view or "change_vs_current" not in table:
+        return table
+    return table.style.map(
+        lambda value: (
+            "color: #268463; font-weight: 650"
+            if str(value).startswith("+")
+            else (
+                "color: #d45a57; font-weight: 650"
+                if str(value).startswith("-")
+                else ""
+            )
+        ),
+        subset=["change_vs_current"],
+    )
 
 
 def _render_method_help(weighting_basis: str) -> None:
@@ -451,6 +536,19 @@ def _render_score_strip(
 ) -> None:
     weighting_basis = str(snapshot.get("weighting_basis") or "float")
     score = float(snapshot["ndx_wdi"])
+    rebalance_score = snapshot.get("rebalance_ndx_wdi")
+    rebalance_available = rebalance_score is not None and not pd.isna(rebalance_score)
+    rebalance_value = (
+        f"{float(rebalance_score):.2f}" if rebalance_available else "n/a"
+    )
+    score_change = (
+        float(rebalance_score) - score if rebalance_available else None
+    )
+    score_change_label = (
+        f"{score_change:+.2f} points vs live"
+        if score_change is not None
+        else "Refresh to calculate"
+    )
     valid_fallbacks = int(
         components["data_status"].astype("string").eq("valid_yfinance_fallback").sum()
     )
@@ -481,6 +579,11 @@ def _render_score_strip(
               {html.escape(universe_label)} | {html.escape(basis_label)}
             </div>
           </div>
+          <div class="ndx-rebalance-score">
+            <div class="ndx-eyebrow">If annual reconstitution ran today</div>
+            <div class="ndx-rebalance-value">{rebalance_value}</div>
+            <div class="ndx-rebalance-change">{score_change_label}</div>
+          </div>
           <div class="ndx-stat">
             <div class="ndx-stat-label">Coverage</div>
             <div class="ndx-stat-value">{_percent(snapshot["coverage_ratio"])}</div>
@@ -500,6 +603,90 @@ def _render_score_strip(
         </div>
         """
     )
+
+
+def _parse_json_list(value: object) -> list[str]:
+    if value is None or str(value).strip() == "":
+        return []
+    try:
+        parsed = json.loads(str(value))
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return [str(value)]
+    return [str(item) for item in parsed]
+
+
+def _render_rebalance_controls(snapshot: dict[str, object]) -> bool:
+    available = snapshot.get("rebalance_ndx_wdi") is not None
+    columns = st.columns([4.9, 1.1], gap="small", vertical_alignment="center")
+    with columns[0]:
+        show_rebalanced = st.toggle(
+            "Show annual-reconstitution weights",
+            value=False,
+            disabled=not available,
+            key=f"rebalance_view_{snapshot['snapshot_id']}",
+            help=(
+                "Replace current ETF weights with the simulated Nasdaq-100 "
+                "weights throughout the constituent views."
+            ),
+        )
+    with columns[1]:
+        with st.popover(
+            "Review method",
+            icon=":material/help:",
+            width="stretch",
+        ):
+            st.markdown(
+                """
+                **Today simulation:** a full annual Nasdaq-100 reconstitution
+                using current prices and current public inputs, as if today were
+                the November reference date.
+
+                Companies are ranked from the public Nasdaq universe. The screen
+                applies Nasdaq listing tier, non-financial classification, security
+                type, three-month liquidity and seasoning or fast-entry rules.
+
+                For direct ACWI matches, modified-capitalization inputs use:
+                `min(converted listed total cap, 3 x ACWI free-float mass)`.
+                The conversion is calibrated from ACWI market values and listed
+                total capitalizations. Yahoo `floatShares` is used only when ACWI
+                cannot provide a direct reference.
+
+                Initial weights are fully rebuilt from modified market
+                capitalization. Company constraints are then applied
+                iteratively: 24%/20%, followed by the 4.5%-48% cohort reduced
+                to 40%.
+
+                Security constraints are applied next: securities above 15%
+                are reduced to 14%; when the five largest securities reach 40%,
+                their aggregate is reduced to 38.5%, and every security outside
+                the top five is capped at the lower of 4.4% or the fifth
+                security's weight.
+                """
+            )
+            additions = _parse_json_list(snapshot.get("rebalance_additions"))
+            removals = _parse_json_list(snapshot.get("rebalance_removals"))
+            st.markdown(
+                f"""
+                - **Reference date:** {snapshot.get("rebalance_reference_date") or "n/a"}
+                - **Coverage:** {_percent(snapshot.get("rebalance_coverage_ratio"))}
+                - **Method:** `{snapshot.get("rebalance_method") or "n/a"}`
+                - **ACWI conversion scale:** {_number(snapshot.get("rebalance_acwi_conversion_scale"), 8)}
+                - **ACWI calibration names:** {snapshot.get("rebalance_acwi_calibration_count") or 0}
+                - **Additions:** {", ".join(additions) or "none"}
+                - **Removals:** {", ".join(removals) or "none"}
+                """
+            )
+            st.caption(
+                "Weight constraints are deterministic. Composition is a "
+                "public-data simulation, not an official Nasdaq review: some "
+                "prior-rank flags, eligibility inputs and Nasdaq discretion "
+                "cannot be independently replicated."
+            )
+            st.markdown(
+                "[Official Nasdaq-100 methodology]"
+                "(https://indexes.nasdaqomx.com/docs/Methodology_NDX.pdf)"
+            )
+    return bool(show_rebalanced)
 
 
 def _render_source_status(snapshot: dict[str, object]) -> None:
@@ -556,10 +743,79 @@ def _valid_components(components: pd.DataFrame) -> pd.DataFrame:
     ].copy()
 
 
-def _render_weight_difference_chart(components: pd.DataFrame) -> None:
+def _components_for_view(
+    components: pd.DataFrame,
+    *,
+    rebalanced_view: bool,
+) -> pd.DataFrame:
+    if not rebalanced_view:
+        return components.copy()
+    data = components.copy()
+    for column in [
+        "rebalance_weight",
+        "rebalance_reference_weight",
+        "rebalance_weight_change",
+        "rebalance_weight_delta",
+        "rebalance_distortion_contribution",
+    ]:
+        if column not in data:
+            data[column] = pd.NA
+        data[column] = pd.to_numeric(data[column], errors="coerce")
+    membership = data.get(
+        "rebalance_membership",
+        pd.Series(False, index=data.index),
+    ).fillna(False).astype(bool)
+    valid = (
+        membership
+        & data["rebalance_weight"].notna()
+        & data["rebalance_reference_weight"].notna()
+    )
+    data["actual_weight"] = data["rebalance_weight"]
+    data["counterfactual_weight"] = data["rebalance_reference_weight"]
+    data["weight_delta"] = data["rebalance_weight_delta"]
+    data["distortion_contribution"] = data[
+        "rebalance_distortion_contribution"
+    ]
+    data["weight_ratio"] = (
+        data["rebalance_weight"] / data["rebalance_reference_weight"]
+    )
+    data["data_status"] = "removed_by_rebalance"
+    data.loc[membership & ~valid, "data_status"] = "rebalance_missing_inputs"
+    data.loc[valid, "data_status"] = "valid_rebalance"
+    return data
+
+
+def _outside_label_axis_range(
+    values: pd.Series,
+    *,
+    padding_ratio: float = 0.24,
+) -> list[float]:
+    """Reserve horizontal plot space for labels placed past bar endpoints."""
+    numeric = pd.to_numeric(values, errors="coerce").dropna()
+    if numeric.empty:
+        return [-0.01, 0.01]
+    lower = min(0.0, float(numeric.min()))
+    upper = max(0.0, float(numeric.max()))
+    span = max(upper - lower, 0.01)
+    padding = padding_ratio * span
+    return [lower - padding, upper + padding]
+
+
+def _render_weight_difference_chart(
+    components: pd.DataFrame,
+    *,
+    rebalanced_view: bool = False,
+) -> None:
     valid = _valid_components(components)
     st.subheader("Largest weight differences")
-    st.caption("Published ETF weight minus the selected capitalization reference.")
+    st.caption(
+        (
+            "Annual-reconstitution weight minus the selected capitalization "
+            "reference."
+            if rebalanced_view
+            else "Published ETF weight minus the selected capitalization reference."
+        )
+    )
     if valid.empty:
         st.info("No valid constituent differences are available.")
         return
@@ -572,23 +828,53 @@ def _render_weight_difference_chart(components: pd.DataFrame) -> None:
     colors = chart_frame["weight_delta"].map(
         lambda value: "#d45a57" if value >= 0 else "#3f7dc0"
     )
-    custom_data = chart_frame[
-        ["actual_weight", "counterfactual_weight", "distortion_contribution"]
-    ].to_numpy()
+    custom_columns = [
+        "actual_weight",
+        "counterfactual_weight",
+        "distortion_contribution",
+    ]
+    if rebalanced_view:
+        custom_columns.append("rebalance_weight_change")
+    custom_data = chart_frame[custom_columns].to_numpy()
+    change_labels = (
+        chart_frame["rebalance_weight_change"].map(lambda value: f"{value:+.2%}")
+        if rebalanced_view
+        else None
+    )
+    change_colors = (
+        chart_frame["rebalance_weight_change"].map(
+            lambda value: "#268463" if value >= 0 else "#d45a57"
+        )
+        if rebalanced_view
+        else THEME["chart_font"]
+    )
+    change_hover = (
+        "<br>Change vs current: %{customdata[3]:+.2%}"
+        if rebalanced_view
+        else ""
+    )
+    displayed_weight_label = (
+        "Annual-reconstitution weight" if rebalanced_view else "Published weight"
+    )
     figure = go.Figure(
         go.Bar(
             x=chart_frame["weight_delta"],
             y=chart_frame["ticker"],
             orientation="h",
             marker={"color": colors, "line": {"width": 0}},
+            text=change_labels,
+            textposition="outside" if rebalanced_view else "none",
+            textfont={"color": change_colors, "size": 10},
+            cliponaxis=False,
             customdata=custom_data,
             hovertemplate=(
                 "<b>%{y}</b><br>"
                 "Weight difference: %{x:.2%}<br>"
-                "Published weight: %{customdata[0]:.2%}<br>"
+                f"{displayed_weight_label}: %{{customdata[0]:.2%}}<br>"
                 "Reference weight: %{customdata[1]:.2%}<br>"
                 "WDI contribution: %{customdata[2]:.2f}"
-                "<extra></extra>"
+                + change_hover
+                + "<extra></extra>"
             ),
         )
     )
@@ -608,6 +894,172 @@ def _render_weight_difference_chart(components: pd.DataFrame) -> None:
             "tickformat": ".1%",
             "gridcolor": THEME["chart_grid"],
             "zeroline": False,
+            "range": (
+                _outside_label_axis_range(chart_frame["weight_delta"])
+                if rebalanced_view
+                else None
+            ),
+        },
+        yaxis={"title": None, "showgrid": False},
+    )
+    st.plotly_chart(figure, width="stretch", config={"displayModeBar": False})
+
+
+def _render_rebalance_changes_chart(components: pd.DataFrame) -> None:
+    if "rebalance_weight_change" not in components:
+        return
+    frame = components.copy()
+    frame["rebalance_weight_change"] = pd.to_numeric(
+        frame["rebalance_weight_change"], errors="coerce"
+    )
+    frame = (
+        frame.dropna(subset=["rebalance_weight_change"])
+        .assign(
+            absolute_change=lambda data: data["rebalance_weight_change"].abs()
+        )
+        .nlargest(15, "absolute_change")
+        .sort_values("rebalance_weight_change")
+    )
+    if frame.empty:
+        return
+    st.subheader("Largest changes caused by the annual reconstitution")
+    st.caption(
+        "Simulated annual-reconstitution weight minus the current published weight."
+    )
+    colors = frame["rebalance_weight_change"].map(
+        lambda value: "#268463" if value >= 0 else "#d45a57"
+    )
+    figure = go.Figure(
+        go.Bar(
+            x=frame["rebalance_weight_change"],
+            y=frame["ticker"],
+            orientation="h",
+            marker={"color": colors, "line": {"width": 0}},
+            text=frame["rebalance_weight_change"].map(
+                lambda value: f"{value:+.2%}"
+            ),
+            textposition="outside",
+            textfont={"color": colors, "size": 10},
+            cliponaxis=False,
+            customdata=frame[["actual_weight", "rebalance_weight"]].to_numpy(),
+            hovertemplate=(
+                "<b>%{y}</b><br>"
+                "Change: %{x:+.2%}<br>"
+                "Current weight: %{customdata[0]:.2%}<br>"
+                "Annual-reconstitution weight: %{customdata[1]:.2%}"
+                "<extra></extra>"
+            ),
+        )
+    )
+    figure.add_vline(x=0, line_width=1, line_color=THEME["chart_zero"])
+    figure.update_layout(
+        template="plotly_dark" if IS_DARK_MODE else "plotly_white",
+        height=430,
+        margin={"l": 8, "r": 35, "t": 10, "b": 35},
+        showlegend=False,
+        bargap=0.28,
+        barcornerradius=6,
+        paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor="rgba(0,0,0,0)",
+        font={"color": THEME["chart_font"], "size": 11},
+        xaxis={
+            "title": None,
+            "tickformat": ".1%",
+            "gridcolor": THEME["chart_grid"],
+            "zeroline": False,
+            "range": _outside_label_axis_range(
+                frame["rebalance_weight_change"]
+            ),
+        },
+        yaxis={"title": None, "showgrid": False},
+    )
+    st.plotly_chart(figure, width="stretch", config={"displayModeBar": False})
+
+
+def _render_rebalance_membership_chart(components: pd.DataFrame) -> None:
+    """Show simulated additions and removals with their entering/exiting weight."""
+    if "rebalance_membership" not in components:
+        return
+    frame = components.copy()
+    frame["actual_weight"] = pd.to_numeric(frame["actual_weight"], errors="coerce").fillna(0)
+    frame["rebalance_weight"] = pd.to_numeric(
+        frame.get("rebalance_weight"), errors="coerce"
+    ).fillna(0)
+    membership = frame["rebalance_membership"].fillna(False).astype(bool)
+    entries = membership & frame["actual_weight"].le(0) & frame["rebalance_weight"].gt(0)
+    exits = ~membership & frame["actual_weight"].gt(0)
+    frame = frame.loc[entries | exits].copy()
+
+    st.subheader("Index entries and exits")
+    st.caption(
+        "Entry bars show simulated annual-reconstitution weight; exit bars show "
+        "current weight removed from the index."
+    )
+    if frame.empty:
+        st.info("No index additions or removals are produced by today's simulation.")
+        return
+
+    frame["movement"] = np.where(
+        frame["rebalance_membership"].astype(bool),
+        "Entry",
+        "Exit",
+    )
+    frame["membership_weight"] = np.where(
+        frame["movement"].eq("Entry"),
+        frame["rebalance_weight"],
+        -frame["actual_weight"],
+    )
+    frame = frame.sort_values("membership_weight")
+    colors = frame["movement"].map({"Entry": "#268463", "Exit": "#d45a57"})
+    figure = go.Figure(
+        go.Bar(
+            x=frame["membership_weight"],
+            y=frame["ticker"],
+            orientation="h",
+            marker={"color": colors, "line": {"width": 0}},
+            text=frame.apply(
+                lambda row: (
+                    f"Entry {row['rebalance_weight']:.2%}"
+                    if row["movement"] == "Entry"
+                    else f"Exit {row['actual_weight']:.2%}"
+                ),
+                axis=1,
+            ),
+            textposition="outside",
+            textfont={"color": colors, "size": 10},
+            cliponaxis=False,
+            customdata=frame[
+                ["movement", "actual_weight", "rebalance_weight"]
+            ].to_numpy(),
+            hovertemplate=(
+                "<b>%{y}</b><br>"
+                "%{customdata[0]}<br>"
+                "Current weight: %{customdata[1]:.2%}<br>"
+                "Annual-reconstitution weight: %{customdata[2]:.2%}"
+                "<extra></extra>"
+            ),
+        )
+    )
+    figure.add_vline(x=0, line_width=1, line_color=THEME["chart_zero"])
+    figure.update_layout(
+        template="plotly_dark" if IS_DARK_MODE else "plotly_white",
+        height=max(250, 54 * len(frame) + 90),
+        margin={"l": 8, "r": 70, "t": 10, "b": 35},
+        showlegend=False,
+        bargap=0.34,
+        barcornerradius=6,
+        paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor="rgba(0,0,0,0)",
+        font={"color": THEME["chart_font"], "size": 11},
+        xaxis={
+            "title": None,
+            "tickformat": ".1%",
+            "gridcolor": THEME["chart_grid"],
+            "zeroline": False,
+            "range": _outside_label_axis_range(
+                frame["membership_weight"],
+                padding_ratio=0.40,
+            ),
         },
         yaxis={"title": None, "showgrid": False},
     )
@@ -845,7 +1297,12 @@ def _render_quarterly_history(snapshot: dict[str, object]) -> None:
     st.plotly_chart(figure, width="stretch", config={"displayModeBar": False})
 
 
-def _render_rankings(components: pd.DataFrame, weighting_basis: str) -> None:
+def _render_rankings(
+    components: pd.DataFrame,
+    weighting_basis: str,
+    *,
+    rebalanced_view: bool = False,
+) -> None:
     valid = _valid_components(components)
     st.html('<div class="ndx-section-rule"></div>')
     st.subheader("Explore constituents")
@@ -854,27 +1311,30 @@ def _render_rankings(components: pd.DataFrame, weighting_basis: str) -> None:
     )
     with overweights:
         st.dataframe(
-            _component_table(
+            _table_for_display(
                 valid.loc[valid["weight_delta"] > 0].nlargest(12, "weight_delta"),
                 weighting_basis,
+                rebalanced_view=rebalanced_view,
             ),
             hide_index=True,
             width="stretch",
         )
     with underweights:
         st.dataframe(
-            _component_table(
+            _table_for_display(
                 valid.loc[valid["weight_delta"] < 0].nsmallest(12, "weight_delta"),
                 weighting_basis,
+                rebalanced_view=rebalanced_view,
             ),
             hide_index=True,
             width="stretch",
         )
     with contributors:
         st.dataframe(
-            _component_table(
+            _table_for_display(
                 valid.nlargest(12, "distortion_contribution"),
                 weighting_basis,
+                rebalanced_view=rebalanced_view,
             ),
             hide_index=True,
             width="stretch",
@@ -882,7 +1342,11 @@ def _render_rankings(components: pd.DataFrame, weighting_basis: str) -> None:
 
     with st.expander(f"All constituents ({len(components)})"):
         st.dataframe(
-            _component_table(components, weighting_basis),
+            _table_for_display(
+                components,
+                weighting_basis,
+                rebalanced_view=rebalanced_view,
+            ),
             hide_index=True,
             width="stretch",
         )
@@ -893,7 +1357,11 @@ def _render_rankings(components: pd.DataFrame, weighting_basis: str) -> None:
     if not excluded.empty:
         with st.expander(f"Excluded data ({len(excluded)})"):
             st.dataframe(
-                _component_table(excluded, weighting_basis),
+                _table_for_display(
+                    excluded,
+                    weighting_basis,
+                    rebalanced_view=rebalanced_view,
+                ),
                 hide_index=True,
                 width="stretch",
             )
@@ -986,19 +1454,38 @@ _render_score_strip(
     universe_label,
     basis_label,
 )
+show_rebalanced = _render_rebalance_controls(snapshot)
 _render_source_status(snapshot)
+display_components = _components_for_view(
+    components,
+    rebalanced_view=show_rebalanced,
+)
 
 show_history = universe == "non_ucits" and weighting_basis == "float"
 if show_history:
     chart_columns = st.columns([0.93, 1.35], gap="large")
     with chart_columns[0]:
-        _render_weight_difference_chart(components)
+        _render_weight_difference_chart(
+            display_components,
+            rebalanced_view=show_rebalanced,
+        )
     with chart_columns[1]:
         _render_quarterly_history(snapshot)
 else:
-    _render_weight_difference_chart(components)
+    _render_weight_difference_chart(
+        display_components,
+        rebalanced_view=show_rebalanced,
+    )
 
-_render_rankings(components, weighting_basis)
+if show_rebalanced:
+    _render_rebalance_changes_chart(components)
+    _render_rebalance_membership_chart(components)
+
+_render_rankings(
+    display_components,
+    weighting_basis,
+    rebalanced_view=show_rebalanced,
+)
 
 st.caption(
     "Universes are never merged or averaged. Each score retains the reference "
