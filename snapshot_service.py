@@ -10,6 +10,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+from active_share import ActiveShareResult, calculate_active_share
 from acwi_weights_provider import (
     DEFAULT_ACWI_URL,
     IsharesAcwiFloatWeightsProvider,
@@ -26,8 +27,10 @@ from nasdaq100_rebalance import (
 )
 from qqq_holdings_provider import (
     DEFAULT_CNDX_URL,
+    DEFAULT_CSPX_URL,
     DEFAULT_EQQQ_URL,
     DEFAULT_IQQ_URL,
+    DEFAULT_IVV_URL,
     CsvHoldingsProvider,
     HoldingsProviderChain,
     HttpCsvHoldingsProvider,
@@ -52,6 +55,7 @@ class RecomputeOutcome:
     reference_data_as_of: str | None = None
     source_failures: tuple[str, ...] = ()
     rebalance: RebalanceResult | None = None
+    active_share: ActiveShareResult | None = None
 
     def summary(self) -> dict[str, object]:
         summary = {
@@ -93,6 +97,19 @@ class RecomputeOutcome:
                         self.rebalance.acwi_calibration_count
                     ),
                     "rebalance_notes": list(self.rebalance.notes),
+                }
+            )
+        if self.active_share is not None:
+            summary.update(
+                {
+                    "active_share": self.active_share.active_share,
+                    "rebalanced_active_share": (
+                        self.active_share.rebalanced_active_share
+                    ),
+                    "spx_reference_fund": self.active_share.spx_reference_fund,
+                    "spx_holdings_source": self.active_share.spx_holdings_source,
+                    "spx_holdings_as_of": self.active_share.spx_holdings_as_of,
+                    "active_share_status": self.active_share.status,
                 }
             )
         return summary
@@ -242,6 +259,22 @@ def recompute_snapshot(
                 rebalance.components,
             ),
         )
+    active_share: ActiveShareResult | None = None
+    try:
+        spx_provider = build_spx_holdings_chain(universe)
+        spx_holdings = spx_provider.get_holdings()
+        source_failures.extend(spx_provider.failures)
+        active_share = calculate_active_share(
+            result.components,
+            spx_holdings,
+            spx_reference_fund=spx_provider.reference_fund,
+            spx_holdings_source=spx_provider.source_name,
+            spx_holdings_as_of=spx_provider.holdings_as_of,
+        )
+    except Exception as exc:
+        source_failures.append(
+            f"S&P 500 holdings comparison: {type(exc).__name__}: {exc}"
+        )
     holdings_source = holdings_provider.source_name
     reference_fund = holdings_provider.reference_fund
 
@@ -258,6 +291,7 @@ def recompute_snapshot(
         market_data_source=market_source,
         weighting_basis=weighting_basis,
         rebalance=rebalance,
+        active_share=active_share,
     )
     return RecomputeOutcome(
         snapshot_id=snapshot_id,
@@ -271,6 +305,7 @@ def recompute_snapshot(
         reference_data_as_of=reference_data_as_of,
         source_failures=tuple(source_failures),
         rebalance=rebalance,
+        active_share=active_share,
     )
 
 
@@ -350,6 +385,55 @@ def build_holdings_chain(
             )
         )
     return HoldingsProviderChain(providers)
+
+
+def build_spx_holdings_chain(
+    universe: str,
+    *,
+    holdings_csv: str | Path | None = None,
+) -> HoldingsProviderChain:
+    if universe not in UNIVERSES:
+        raise ValueError(f"universe must be one of: {UNIVERSES}.")
+    timeout = int(os.getenv("HTTP_TIMEOUT_SECONDS", "30"))
+    configured_csv = holdings_csv or os.getenv(
+        (
+            "NON_UCITS_SPX_HOLDINGS_CSV"
+            if universe == "non_ucits"
+            else "UCITS_SPX_HOLDINGS_CSV"
+        )
+    )
+    providers = []
+    if configured_csv:
+        providers.append(
+            CsvHoldingsProvider(
+                configured_csv,
+                source_name=f"configured_{universe}_spx_csv",
+                reference_fund="configured_spx_csv",
+            )
+        )
+    if universe == "non_ucits":
+        providers.append(
+            HttpCsvHoldingsProvider(
+                url=os.getenv("IVV_HOLDINGS_URL", DEFAULT_IVV_URL),
+                timeout=timeout,
+                source_name="ishares_ivv_public_holdings",
+                reference_fund="IVV",
+            )
+        )
+    else:
+        providers.append(
+            HttpCsvHoldingsProvider(
+                url=os.getenv("CSPX_HOLDINGS_URL", DEFAULT_CSPX_URL),
+                timeout=timeout,
+                source_name="ishares_cspx_public_holdings",
+                reference_fund="CSPX",
+            )
+        )
+    return HoldingsProviderChain(
+        providers,
+        min_constituents=450,
+        max_constituents=550,
+    )
 
 
 def _combined_rebalance_holdings(

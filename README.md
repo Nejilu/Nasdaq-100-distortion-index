@@ -77,6 +77,43 @@ reallocated to move from one distribution to the other.
 The ETF holdings remain proxies for the index, and free market-data sources are
 not official or guaranteed. Local history starts with the first saved snapshot.
 
+## NDX vs S&P 500 Active Share
+
+The second dashboard panel compares the selected Nasdaq-100 ETF with the
+matching iShares S&P 500 ETF:
+
+| Universe | Nasdaq-100 proxy | S&P 500 proxy |
+| --- | --- | --- |
+| Non-UCITS | IQQ | IVV |
+| UCITS | CNDX | CSPX |
+
+Each pair is normalized independently over its published equity holdings. The
+calculation then uses the full union of securities in both funds, assigning
+zero to a security that is absent from one side:
+
+```text
+active_share = 50 x sum(abs(NDX_weight - SPX_weight))
+```
+
+An Active Share of 46.7% means that 46.7% of either portfolio would need to be
+reallocated for the two normalized weight distributions to match. It measures
+weight and membership differences between the ETF proxies; it is not a return,
+tracking-error, or performance forecast.
+
+The panel includes:
+
+- the ten largest NDX overweights and ten largest S&P 500 overweights;
+- a Top-X slider that compares the aggregate weight of the largest NDX names in
+  both portfolios;
+- an overlaid constituent breakdown for that selected Top-X set;
+- an annual-reconstitution toggle that replaces current NDX weights with the
+  same public-data annual simulation used by the distortion panel, while the
+  S&P 500 reference remains unchanged.
+
+Official iShares holdings downloads are the primary S&P 500 sources. Optional
+local files can be configured with `NON_UCITS_SPX_HOLDINGS_CSV` and
+`UCITS_SPX_HOLDINGS_CSV`.
+
 ## If rebalanced today
 
 Each live snapshot also calculates an `NDX_WDI` using the weights that the
@@ -245,8 +282,9 @@ used.
 ## Architecture
 
 ```text
-qqq_holdings_provider.py  # IQQ/QQQ and CNDX/EQQQ provider chains
+qqq_holdings_provider.py  # Nasdaq-100 and S&P 500 iShares provider chains
 acwi_weights_provider.py  # ACWI matching, ADR labels, calibrated fallbacks
+active_share.py           # NDX/SPX union, normalization, and Active Share
 edgar_quarterly_history.py # N-PORT archive, CUSIP history, quarterly scores
 market_data_provider.py   # live market data through yfinance
 distortion_engine.py      # pure calculations, coverage, and statuses
@@ -327,10 +365,14 @@ The launcher returns immediately, prints the process IDs, and skips services
 whose ports are already listening. It uses detached Windows processes or a new
 POSIX session as appropriate. Runtime output is written under `data/`.
 
-The dashboard provides matching segmented controls for:
+The dashboard header selects either `NDX Distortion Index` or
+`NDX vs S&P 500`. Both panels provide a matching universe control:
 
 - `Non-UCITS` or `UCITS`
-- `Free Float` or `Total`
+
+The distortion panel also provides `Free Float` or `Total`. Active Share uses
+published ETF weights and therefore does not expose that counterfactual basis
+control.
 
 The Refresh button updates the selected universe and capitalization basis using
 live data only.
@@ -361,6 +403,8 @@ GET  /api/current?universe=ucits
 GET  /api/current?universe=ucits&weighting_basis=total
 GET  /api/history?limit=365&universe=non_ucits
 GET  /api/components?universe=ucits&weighting_basis=total&ranking=contributors&limit=20
+GET  /api/active-share?universe=non_ucits&ranking=contributors&limit=20
+GET  /api/active-share?universe=ucits&rebalanced=true
 POST /api/recompute
 ```
 
@@ -372,7 +416,9 @@ curl -X POST http://127.0.0.1:8000/api/recompute \
   -d '{"universe":"all","weighting_basis":"total"}'
 ```
 
-`ranking` accepts `all`, `overweights`, `underweights`, or `contributors`.
+For `/api/components`, `ranking` accepts `all`, `overweights`,
+`underweights`, or `contributors`. For `/api/active-share`, it accepts `all`,
+`ndx_overweights`, `spx_overweights`, or `contributors`.
 
 ## Daily snapshots
 

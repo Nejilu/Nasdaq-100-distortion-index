@@ -108,6 +108,59 @@ def components(
     return rows[:limit]
 
 
+@app.get("/api/active-share")
+def active_share(
+    snapshot_id: int | None = Query(None, ge=1),
+    universe: Literal["non_ucits", "ucits"] = "non_ucits",
+    weighting_basis: Literal["float", "total"] = "float",
+    ranking: Literal[
+        "all",
+        "ndx_overweights",
+        "spx_overweights",
+        "contributors",
+    ] = "all",
+    rebalanced: bool = False,
+    limit: int = Query(1000, ge=1, le=1000),
+) -> dict[str, object]:
+    database = get_database()
+    if snapshot_id is not None and database.get_snapshot(snapshot_id) is None:
+        raise HTTPException(status_code=404, detail="Snapshot not found.")
+    summary = database.get_active_share(
+        snapshot_id,
+        universe=universe,
+        weighting_basis=weighting_basis,
+    )
+    if summary is None:
+        raise HTTPException(
+            status_code=404,
+            detail="No Active Share comparison is available.",
+        )
+    rows = database.get_active_share_components(
+        int(summary["snapshot_id"]),
+    )
+    delta_column = (
+        "rebalanced_weight_delta" if rebalanced else "weight_delta"
+    )
+    if ranking == "ndx_overweights":
+        rows = sorted(
+            (row for row in rows if (row.get(delta_column) or 0) > 0),
+            key=lambda row: row.get(delta_column) or 0,
+            reverse=True,
+        )
+    elif ranking == "spx_overweights":
+        rows = sorted(
+            (row for row in rows if (row.get(delta_column) or 0) < 0),
+            key=lambda row: row.get(delta_column) or 0,
+        )
+    elif ranking == "contributors":
+        rows = sorted(
+            rows,
+            key=lambda row: abs(row.get(delta_column) or 0),
+            reverse=True,
+        )
+    return {"summary": summary, "components": rows[:limit]}
+
+
 @app.post("/api/recompute", status_code=201)
 def recompute(payload: RecomputeRequest) -> dict[str, object]:
     if payload.holdings_csv and not Path(payload.holdings_csv).exists():
