@@ -80,7 +80,8 @@ not official or guaranteed. Local history starts with the first saved snapshot.
 ## If rebalanced today
 
 Each live snapshot also calculates an `NDX_WDI` using the weights that the
-Nasdaq-100 would receive if a quarterly review were run on the snapshot date.
+Nasdaq-100 would receive if its full annual December reconstitution used the
+snapshot date's prices and public inputs.
 The implementation follows the
 [Nasdaq-100 methodology effective May 1, 2026](https://indexes.nasdaqomx.com/docs/Methodology_NDX.pdf)
 and the official
@@ -92,11 +93,11 @@ The daily pipeline:
    Nasdaq Trader symbol directory.
 2. Groups multiple share classes at company level with SEC CIK identifiers.
 3. Applies Nasdaq listing tier, non-financial, security-type, three-month ADVT,
-   seasoning, rank-125 replacement, and top-40 fast-entry rules.
+   seasoning, and the annual top-75/100/125 constituent-selection sequence.
    Non-constituent ADRs are excluded unless primary-listing and listed
-   depositary-share inputs can be verified.
-4. Calculates each security's modified-capitalization mass for low-float
-   adjustments, entrant ranking/interpolation, and any triggered recapping:
+   depositary-share inputs can be verified. Current membership is a conservative
+   public proxy for the prior-top-100 and post-reconstitution-addition flags.
+4. Recalculates every security's initial weight from modified capitalization:
 
    ```text
    acwi_conversion_scale =
@@ -110,28 +111,25 @@ The daily pipeline:
    ACWI names whose free float is close to 100%. Direct ACWI matches never use
    yfinance `floatShares`. For ADR/ADS securities or absent ACWI positions,
    yfinance free float remains a documented fallback.
-5. Preserves current published tracker weights as a public proxy for inherited
-   Nasdaq Index Shares. Nasdaq adjusts those shares for accumulated TSO and
-   low-float changes at quarterly reviews; exact prior Index Shares are
-   proprietary, so that delta cannot be reconstructed perfectly from public
-   data. New constituents receive a linearly interpolated weight based on their
-   modified-capitalization rank.
-6. Aggregates securities by company and first evaluates the current
-   **quarterly** concentration tests. Only when a company exceeds 24%, or the
-   aggregate of companies above 4.5% reaches 48%, does the corresponding
-   20%/40% redistribution run. Uncapped names share a common proportional
-   adjustment factor and initial rank is preserved.
-   The 38.5% constraint is not part of this quarterly calculation. It is the
-   separate annual December security-level rule: if the five largest securities
-   total at least 40%, their aggregate is adjusted to 38.5%.
-7. Compares the resulting security weights with the selected free-float or
+5. Aggregates securities by company and iterates the annual company constraints:
+   a company above 24% is reduced to at most 20%; if companies above 4.5%
+   aggregate to at least 48%, that cohort is reduced to 40%. Initial rank is
+   preserved.
+6. Returns to security weights and iterates the annual security constraints:
+   a security above 15% is reduced to at most 14%; if the five largest
+   securities aggregate to at least 40%, they are reduced to 38.5% and every
+   security outside the top five is capped at the lower of 4.4% or the
+   fifth-largest weight.
+7. Converts the final weights into the proportional Index Shares represented by
+   the simulation.
+8. Compares the resulting security weights with the selected free-float or
    total-cap reference and recalculates `NDX_WDI`.
 
 The dashboard displays this score beside the live reading. Enabling **Show
-post-rebalance weights** switches the constituent rankings and main difference
-chart to simulated weights, adds signed changes versus current weights, and
-shows dedicated charts for the largest rebalance movements and for simulated
-index entries/exits with their entering or exiting weights.
+annual-reconstitution weights** switches the constituent rankings and main
+difference chart to simulated weights, adds signed changes versus current
+weights, and shows dedicated charts for the largest weight movements and
+simulated index entries/exits.
 
 The weight constraints are deterministic, but the composition result is a
 public-data simulation rather than an official Nasdaq review. Nasdaq retains

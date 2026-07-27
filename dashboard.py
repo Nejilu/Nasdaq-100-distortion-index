@@ -459,9 +459,9 @@ def _component_table(
     if rebalanced_view:
         result = result.rename(
             columns={
-                "actual_weight": "post_rebalance_weight",
+                "actual_weight": "annual_reconstitution_weight",
                 "rebalance_weight_change": "change_vs_current",
-                "rebalance_membership": "post_rebalance_status",
+                "rebalance_membership": "annual_membership_status",
             }
         )
     return result
@@ -580,7 +580,7 @@ def _render_score_strip(
             </div>
           </div>
           <div class="ndx-rebalance-score">
-            <div class="ndx-eyebrow">If quarterly review ran today</div>
+            <div class="ndx-eyebrow">If annual reconstitution ran today</div>
             <div class="ndx-rebalance-value">{rebalance_value}</div>
             <div class="ndx-rebalance-change">{score_change_label}</div>
           </div>
@@ -620,7 +620,7 @@ def _render_rebalance_controls(snapshot: dict[str, object]) -> bool:
     columns = st.columns([4.9, 1.1], gap="small", vertical_alignment="center")
     with columns[0]:
         show_rebalanced = st.toggle(
-            "Show post-rebalance weights",
+            "Show annual-reconstitution weights",
             value=False,
             disabled=not available,
             key=f"rebalance_view_{snapshot['snapshot_id']}",
@@ -637,7 +637,9 @@ def _render_rebalance_controls(snapshot: dict[str, object]) -> bool:
         ):
             st.markdown(
                 """
-                **Today simulation:** current 2026 quarterly Nasdaq-100 rules.
+                **Today simulation:** a full annual Nasdaq-100 reconstitution
+                using current prices and current public inputs, as if today were
+                the November reference date.
 
                 Companies are ranked from the public Nasdaq universe. The screen
                 applies Nasdaq listing tier, non-financial classification, security
@@ -649,15 +651,16 @@ def _render_rebalance_controls(snapshot: dict[str, object]) -> bool:
                 total capitalizations. Yahoo `floatShares` is used only when ACWI
                 cannot provide a direct reference.
 
-                Quarterly initial weights preserve current published tracker
-                weights as a public proxy for Nasdaq Index Shares. Entrants use
-                Nasdaq's modified-cap rank interpolation. The 24% and 48%
-                concentration tests are evaluated before any 20% or 40%
-                redistribution is applied.
+                Initial weights are fully rebuilt from modified market
+                capitalization. Company constraints are then applied
+                iteratively: 24%/20%, followed by the 4.5%-48% cohort reduced
+                to 40%.
 
-                The **38.5% rule does not apply here**: it is the annual December
-                security-level rule for the top five securities when their
-                combined weight reaches 40%.
+                Security constraints are applied next: securities above 15%
+                are reduced to 14%; when the five largest securities reach 40%,
+                their aggregate is reduced to 38.5%, and every security outside
+                the top five is capped at the lower of 4.4% or the fifth
+                security's weight.
                 """
             )
             additions = _parse_json_list(snapshot.get("rebalance_additions"))
@@ -674,10 +677,10 @@ def _render_rebalance_controls(snapshot: dict[str, object]) -> bool:
                 """
             )
             st.caption(
-                "Weight constraints are deterministic. Composition and quarterly "
-                "Index Shares are public-data proxies, not an official Nasdaq "
-                "review: accumulated TSO changes and some proprietary eligibility "
-                "inputs cannot be independently replicated."
+                "Weight constraints are deterministic. Composition is a "
+                "public-data simulation, not an official Nasdaq review: some "
+                "prior-rank flags, eligibility inputs and Nasdaq discretion "
+                "cannot be independently replicated."
             )
             st.markdown(
                 "[Official Nasdaq-100 methodology]"
@@ -803,7 +806,8 @@ def _render_weight_difference_chart(
     st.subheader("Largest weight differences")
     st.caption(
         (
-            "Post-rebalance weight minus the selected capitalization reference."
+            "Annual-reconstitution weight minus the selected capitalization "
+            "reference."
             if rebalanced_view
             else "Published ETF weight minus the selected capitalization reference."
         )
@@ -845,6 +849,9 @@ def _render_weight_difference_chart(
         if rebalanced_view
         else ""
     )
+    displayed_weight_label = (
+        "Annual-reconstitution weight" if rebalanced_view else "Published weight"
+    )
     figure = go.Figure(
         go.Bar(
             x=chart_frame["weight_delta"],
@@ -859,7 +866,7 @@ def _render_weight_difference_chart(
             hovertemplate=(
                 "<b>%{y}</b><br>"
                 "Weight difference: %{x:.2%}<br>"
-                "Published weight: %{customdata[0]:.2%}<br>"
+                f"{displayed_weight_label}: %{{customdata[0]:.2%}}<br>"
                 "Reference weight: %{customdata[1]:.2%}<br>"
                 "WDI contribution: %{customdata[2]:.2f}"
                 + change_hover
@@ -911,8 +918,10 @@ def _render_rebalance_changes_chart(components: pd.DataFrame) -> None:
     )
     if frame.empty:
         return
-    st.subheader("Largest changes caused by the rebalance")
-    st.caption("Simulated post-rebalance weight minus the current published weight.")
+    st.subheader("Largest changes caused by the annual reconstitution")
+    st.caption(
+        "Simulated annual-reconstitution weight minus the current published weight."
+    )
     colors = frame["rebalance_weight_change"].map(
         lambda value: "#268463" if value >= 0 else "#d45a57"
     )
@@ -931,7 +940,7 @@ def _render_rebalance_changes_chart(components: pd.DataFrame) -> None:
                 "<b>%{y}</b><br>"
                 "Change: %{x:+.2%}<br>"
                 "Current weight: %{customdata[0]:.2%}<br>"
-                "Post-rebalance weight: %{customdata[1]:.2%}"
+                "Annual-reconstitution weight: %{customdata[1]:.2%}"
                 "<extra></extra>"
             ),
         )
@@ -974,8 +983,8 @@ def _render_rebalance_membership_chart(components: pd.DataFrame) -> None:
 
     st.subheader("Index entries and exits")
     st.caption(
-        "Entry bars show simulated post-rebalance weight; exit bars show current "
-        "weight removed from the index."
+        "Entry bars show simulated annual-reconstitution weight; exit bars show "
+        "current weight removed from the index."
     )
     if frame.empty:
         st.info("No index additions or removals are produced by today's simulation.")
@@ -1015,7 +1024,7 @@ def _render_rebalance_membership_chart(components: pd.DataFrame) -> None:
                 "<b>%{y}</b><br>"
                 "%{customdata[0]}<br>"
                 "Current weight: %{customdata[1]:.2%}<br>"
-                "Post-rebalance weight: %{customdata[2]:.2%}"
+                "Annual-reconstitution weight: %{customdata[2]:.2%}"
                 "<extra></extra>"
             ),
         )

@@ -8,6 +8,7 @@ from nasdaq100_rebalance import (
     apply_company_capping,
     derive_acwi_total_cap_conversion,
     select_annual_companies,
+    select_annual_universe,
     select_quarterly_companies,
     simulate_rebalance,
 )
@@ -111,6 +112,46 @@ def test_annual_selection_follows_top_75_then_retention_sequence():
     assert "C100" not in selected
 
 
+def test_annual_universe_returns_exactly_100_companies():
+    universe = pd.DataFrame(
+        {
+            "ticker": [f"C{rank}" for rank in range(1, 131)],
+            "company_name": [f"C{rank}" for rank in range(1, 131)],
+            "company_id": [f"C{rank}" for rank in range(1, 131)],
+            "security_type": ["Ordinary share"] * 130,
+            "company_full_market_cap": list(range(130, 0, -1)),
+            "base_eligible": [True] * 130,
+            "regular_eligible": [True] * 130,
+        }
+    )
+    universe = pd.concat(
+        [
+            universe,
+            pd.DataFrame(
+                {
+                    "ticker": ["C1B"],
+                    "company_name": ["C1 Class B"],
+                    "company_id": ["C1"],
+                    "security_type": ["Ordinary share"],
+                    "company_full_market_cap": [130],
+                    "base_eligible": [True],
+                    "regular_eligible": [True],
+                }
+            ),
+        ],
+        ignore_index=True,
+    )
+    current = [f"C{rank}" for rank in range(1, 101)] + ["C1B"]
+
+    result = select_annual_universe(universe, current)
+
+    assert len(result.selected_company_ids) == 100
+    assert len(result.selected_tickers) == 101
+    assert {"C1", "C1B"}.issubset(result.selected_tickers)
+    assert not result.additions
+    assert not result.removals
+
+
 def test_rebalance_uses_modified_cap_ratio_and_calculates_new_wdi():
     tickers = ["A"] + [f"S{i}" for i in range(25)]
     holdings = pd.DataFrame(
@@ -150,12 +191,18 @@ def test_rebalance_uses_modified_cap_ratio_and_calculates_new_wdi():
         }
     )
 
-    result = simulate_rebalance(holdings, reference, selection)
+    result = simulate_rebalance(
+        holdings,
+        reference,
+        selection,
+        rebalance_type="annual",
+    )
     components = result.components.set_index("ticker")
 
     assert math.isclose(components["rebalance_weight"].sum(), 1.0)
     assert components.loc["A", "modified_cap_ratio"] == 3.0
-    assert components.loc["A", "rebalance_weight"] == 0.20
+    assert components.loc["A", "rebalance_weight"] == 0.14
+    assert result.method == "annual_modified_market_cap_2026"
     assert result.ndx_wdi > 0
 
 

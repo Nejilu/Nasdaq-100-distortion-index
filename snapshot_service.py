@@ -128,7 +128,7 @@ def recompute_snapshot(
                 "NASDAQ_UNIVERSE_CACHE_PATH",
                 "data/nasdaq_public_universe_cache.csv",
             ),
-        ).get_quarterly_selection(holdings)
+        ).get_annual_selection(holdings)
     except Exception as exc:
         failure = f"Nasdaq rebalance universe: {type(exc).__name__}: {exc}"
         source_failures.append(failure)
@@ -226,7 +226,7 @@ def recompute_snapshot(
         holdings,
         rebalance_reference,
         selection,
-        rebalance_type="quarterly",
+        rebalance_type="annual",
     )
     result = replace(
         result,

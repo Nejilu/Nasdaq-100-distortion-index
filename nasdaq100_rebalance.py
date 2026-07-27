@@ -192,6 +192,113 @@ class NasdaqPublicUniverseProvider:
             notes=tuple(notes),
         )
 
+    def get_annual_selection(
+        self,
+        current_holdings: pd.DataFrame,
+        *,
+        as_of: date | None = None,
+    ) -> SelectionResult:
+        """Simulate the December reconstitution with current public inputs."""
+        as_of = as_of or date.today()
+        current_tickers = {
+            str(value).upper().strip()
+            for value in current_holdings["ticker"].dropna()
+        }
+        universe = self._download_universe()
+        universe["is_current"] = universe["ticker"].isin(current_tickers)
+
+        missing_current = current_tickers.difference(universe["ticker"])
+        if missing_current:
+            fallback_names = (
+                current_holdings.set_index("ticker")["company_name"].to_dict()
+                if "company_name" in current_holdings
+                else {}
+            )
+            universe = pd.concat(
+                [
+                    universe,
+                    pd.DataFrame(
+                        {
+                            "ticker": sorted(missing_current),
+                            "company_name": [
+                                fallback_names.get(ticker, ticker)
+                                for ticker in sorted(missing_current)
+                            ],
+                            "company_id": [
+                                f"TICKER:{ticker}" for ticker in sorted(missing_current)
+                            ],
+                            "full_market_cap": np.nan,
+                            "security_type": "Ordinary share",
+                            "is_current": True,
+                            "base_eligible": True,
+                            "ipo_year": np.nan,
+                        }
+                    ),
+                ],
+                ignore_index=True,
+            )
+
+        universe["company_full_market_cap"] = universe.groupby("company_id")[
+            "full_market_cap"
+        ].transform("max")
+        candidate_company_ids = (
+            universe.loc[universe["base_eligible"] | universe["is_current"]]
+            .sort_values("company_full_market_cap", ascending=False, na_position="last")
+            .drop_duplicates("company_id")
+            .head(180)
+            ["company_id"]
+        )
+        candidate_securities = universe.loc[
+            universe["company_id"].isin(candidate_company_ids)
+            & (universe["base_eligible"] | universe["is_current"]),
+            "ticker",
+        ]
+        liquidity = self._download_liquidity(
+            candidate_securities.tolist(),
+            as_of=as_of,
+        )
+        universe = universe.merge(liquidity, on="ticker", how="left")
+
+        current = universe["is_current"]
+        liquid = universe["advt_3m"].ge(5_000_000)
+        seasoned = universe["first_trade_date"].map(
+            lambda value: _has_three_full_calendar_months(value, as_of)
+        )
+        verified_listing_form = current | ~universe["security_type"].eq("ADR/ADS")
+        universe["regular_eligible"] = (
+            universe["base_eligible"]
+            & verified_listing_form
+            & liquid
+            & (seasoned | current)
+        )
+
+        result = select_annual_universe(universe, current_tickers)
+        notes = list(result.notes)
+        notes.extend(
+            [
+                "Composition uses public Nasdaq/SEC classifications and "
+                "yfinance liquidity; Nasdaq discretion and non-public review "
+                "inputs are not replicable.",
+                "Non-constituent ADRs are excluded unless primary-listing and "
+                "listed depositary-share inputs can be verified.",
+                "Current constituent status is used as a conservative public "
+                "proxy for the prior reconstitution top-100 and subsequent "
+                "addition flags.",
+            ]
+        )
+        return SelectionResult(
+            securities=result.securities,
+            selected_tickers=result.selected_tickers,
+            selected_company_ids=result.selected_company_ids,
+            additions=result.additions,
+            removals=result.removals,
+            status="public_data_simulation",
+            source=self.source_name,
+            as_of=as_of.isoformat(),
+            eligible_company_count=result.eligible_company_count,
+            notes=tuple(notes),
+        )
+
     def _download_universe(self) -> pd.DataFrame:
         browser_headers = {
             "User-Agent": (
@@ -572,6 +679,77 @@ def select_annual_companies(
     )
     add(ranked.loc[ranked["rank"].le(100), "company_id"])
     return tuple(selected)
+
+
+def select_annual_universe(
+    universe: pd.DataFrame,
+    current_tickers: Iterable[str],
+) -> SelectionResult:
+    """Apply annual eligibility and the top-75/100/125 selection sequence."""
+    data = universe.copy()
+    current_tickers = {str(value).upper().strip() for value in current_tickers}
+    data["ticker"] = data["ticker"].astype("string").str.upper().str.strip()
+    data["is_current"] = data["ticker"].isin(current_tickers)
+    for column, default in [
+        ("regular_eligible", False),
+        ("company_full_market_cap", np.nan),
+    ]:
+        if column not in data:
+            data[column] = default
+
+    company = (
+        data.loc[data["regular_eligible"]]
+        .sort_values("company_full_market_cap", ascending=False, na_position="last")
+        .groupby("company_id", as_index=False, sort=False)
+        .agg(full_market_cap=("company_full_market_cap", "max"))
+        .sort_values("full_market_cap", ascending=False, na_position="last")
+        .reset_index(drop=True)
+    )
+    current_companies = set(
+        data.loc[data["is_current"], "company_id"].dropna().astype(str)
+    )
+    # Public tracker membership identifies prior constituents and subsequent
+    # additions, but Nasdaq does not publish the two flags separately.
+    selected = set(
+        select_annual_companies(
+            company,
+            previous_constituents=current_companies,
+            previous_top_100=current_companies,
+        )
+    )
+
+    selected_rows = data.loc[
+        data["company_id"].isin(selected) & data["regular_eligible"]
+    ].copy()
+    selected_tickers = tuple(selected_rows["ticker"].drop_duplicates())
+    selected_current = set(selected_tickers).intersection(current_tickers)
+    additions = tuple(sorted(set(selected_tickers).difference(current_tickers)))
+    removals = tuple(sorted(current_tickers.difference(selected_current)))
+
+    data["selected"] = data["ticker"].isin(selected_tickers)
+    securities = data.loc[
+        data["is_current"] | data["selected"],
+        [
+            "ticker",
+            "company_name",
+            "company_id",
+            "security_type",
+            "is_current",
+            "selected",
+        ],
+    ].drop_duplicates("ticker", keep="first")
+    return SelectionResult(
+        securities=securities,
+        selected_tickers=selected_tickers,
+        selected_company_ids=tuple(sorted(selected)),
+        additions=additions,
+        removals=removals,
+        status="calculated",
+        source="provided_universe",
+        as_of=date.today().isoformat(),
+        eligible_company_count=len(company),
+        notes=(),
+    )
 
 
 def simulate_rebalance(
@@ -990,53 +1168,68 @@ def apply_company_capping(initial_weights: pd.Series) -> pd.Series:
     # universe. Tiny synthetic fixtures cannot mathematically absorb a 20% cap.
     if len(weights) < 5:
         return weights
-    base = weights.copy()
-    capped: set[object] = set()
-    for _ in range(len(weights) + 1):
-        capped.update(weights.index[weights.gt(0.24 + 1e-12)])
-        if not capped:
-            break
-        caps = pd.Series(1.0, index=weights.index)
-        caps.loc[list(capped)] = 0.20
-        weights = _proportional_with_caps(base, caps)
-        if not weights.drop(index=list(capped)).gt(0.24 + 1e-12).any():
-            break
 
-    stage_two_base = weights.copy()
-    large = set(weights.index[weights.gt(0.045 + 1e-12)])
-    if float(weights.loc[list(large)].sum()) >= 0.48 - 1e-12:
-        large_index = weights.index.isin(large)
-        large_base = stage_two_base.loc[large_index]
-        small_base = stage_two_base.loc[~large_index]
-        if small_base.empty:
-            raise ValueError(
-                "Company-level aggregate capping requires companies outside "
-                "the greater-than-4.5% cohort."
+    for _ in range(len(weights) + 1):
+        changed = False
+        if weights.gt(0.24 + 1e-12).any():
+            weights = _proportional_with_caps(
+                weights,
+                pd.Series(0.20, index=weights.index),
             )
-        adjusted = pd.Series(0.0, index=weights.index)
-        adjusted.loc[large_index] = 0.40 * large_base / large_base.sum()
-        smallest_large = float(adjusted.loc[large_index].min())
-        outside_cap = min(0.045, smallest_large)
-        adjusted.loc[~large_index] = _proportional_with_caps(
-            small_base / small_base.sum(),
-            pd.Series(outside_cap / 0.60, index=small_base.index),
-        ) * 0.60
-        weights = adjusted
+            changed = True
+
+        stage_two_base = weights.copy()
+        large = set(weights.index[weights.gt(0.045 + 1e-12)])
+        if float(weights.loc[list(large)].sum()) >= 0.48 - 1e-12:
+            large_index = weights.index.isin(large)
+            large_base = stage_two_base.loc[large_index]
+            small_base = stage_two_base.loc[~large_index]
+            if small_base.empty:
+                raise ValueError(
+                    "Company-level aggregate capping requires companies outside "
+                    "the greater-than-4.5% cohort."
+                )
+            adjusted = pd.Series(0.0, index=weights.index)
+            adjusted.loc[large_index] = 0.40 * large_base / large_base.sum()
+            smallest_large = float(adjusted.loc[large_index].min())
+            outside_cap = min(0.045, smallest_large)
+            adjusted.loc[~large_index] = _proportional_with_caps(
+                small_base / small_base.sum(),
+                pd.Series(outside_cap / 0.60, index=small_base.index),
+            ) * 0.60
+            weights = adjusted
+            changed = True
+
+        if not company_capping_required(weights):
+            break
+        if not changed:
+            break
     return weights / weights.sum()
 
 
 def apply_annual_security_capping(initial_weights: pd.Series) -> pd.Series:
     """Apply the annual security-level 14%, top-five and 4.4% constraints."""
     weights = _normalize_positive(initial_weights)
-    base = weights.copy()
-    if weights.gt(0.15 + 1e-12).any():
+    # At least eight securities are needed to absorb a universal 14% cap.
+    # This guard only affects deliberately tiny synthetic test fixtures.
+    if len(weights) < 8:
+        return weights
+    for _ in range(len(weights) + 1):
+        if not weights.gt(0.15 + 1e-12).any():
+            break
+        base = weights.copy()
         caps = pd.Series(1.0, index=weights.index)
         caps.loc[weights.gt(0.15 + 1e-12)] = 0.14
         weights = _proportional_with_caps(base, caps)
 
-    stage_two_base = weights.copy()
-    top_five = list(weights.nlargest(min(5, len(weights))).index)
-    if len(top_five) == 5 and float(weights.loc[top_five].sum()) >= 0.40 - 1e-12:
+    for _ in range(len(weights) + 1):
+        top_five = list(weights.nlargest(min(5, len(weights))).index)
+        if (
+            len(top_five) < 5
+            or float(weights.loc[top_five].sum()) < 0.40 - 1e-12
+        ):
+            break
+        stage_two_base = weights.copy()
         top_base = stage_two_base.loc[top_five]
         outside = stage_two_base.drop(index=top_five)
         result = pd.Series(0.0, index=weights.index)

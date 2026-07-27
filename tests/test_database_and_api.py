@@ -79,7 +79,7 @@ class _LiveNasdaqUniverseProvider:
     def __init__(self, **_: object) -> None:
         pass
 
-    def get_quarterly_selection(self, holdings: pd.DataFrame):
+    def get_annual_selection(self, holdings: pd.DataFrame):
         return fallback_current_selection(
             holdings,
             reason="Deterministic test composition.",
@@ -120,10 +120,7 @@ def test_live_snapshot_roundtrip(tmp_path, live_sources):
     assert current["market_data_source"] == "test_acwi_reference"
     assert current["reference_data_as_of"] == "2026-07-24"
     assert current["rebalance_ndx_wdi"] is not None
-    assert (
-        current["rebalance_method"]
-        == "quarterly_index_shares_then_modified_cap_2026"
-    )
+    assert current["rebalance_method"] == "annual_modified_market_cap_2026"
     assert len(components) == 3
     assert {row["reference_source"] for row in components} == {"ishares_acwi"}
     assert all(row["rebalance_weight"] is not None for row in components)
