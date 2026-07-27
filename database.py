@@ -31,6 +31,7 @@ CREATE TABLE IF NOT EXISTS snapshots (
     universe TEXT NOT NULL DEFAULT 'non_ucits',
     reference_fund TEXT,
     holdings_as_of TEXT,
+    reference_data_as_of TEXT,
     source_failures TEXT,
     holdings_source TEXT,
     market_data_source TEXT
@@ -49,6 +50,10 @@ CREATE TABLE IF NOT EXISTS snapshot_components (
     price REAL,
     float_shares REAL,
     reference_shares REAL,
+    security_type TEXT NOT NULL DEFAULT 'Ordinary share',
+    reference_source TEXT,
+    acwi_weight REAL,
+    acwi_listing TEXT,
     data_status TEXT NOT NULL DEFAULT 'valid',
     PRIMARY KEY (snapshot_id, ticker),
     FOREIGN KEY (snapshot_id) REFERENCES snapshots(snapshot_id) ON DELETE CASCADE
@@ -115,6 +120,7 @@ class SnapshotDatabase:
             "universe": "TEXT NOT NULL DEFAULT 'non_ucits'",
             "reference_fund": "TEXT",
             "holdings_as_of": "TEXT",
+            "reference_data_as_of": "TEXT",
             "source_failures": "TEXT",
         }
         for column, definition in additions.items():
@@ -130,6 +136,10 @@ class SnapshotDatabase:
         additions = {
             "counterfactual_weight": "REAL",
             "reference_shares": "REAL",
+            "security_type": "TEXT NOT NULL DEFAULT 'Ordinary share'",
+            "reference_source": "TEXT",
+            "acwi_weight": "REAL",
+            "acwi_listing": "TEXT",
         }
         for column, definition in additions.items():
             if column not in existing:
@@ -148,6 +158,7 @@ class SnapshotDatabase:
         weighting_basis: str = "float",
         reference_fund: str | None = None,
         holdings_as_of: str | None = None,
+        reference_data_as_of: str | None = None,
         source_failures: str | None = None,
     ) -> int:
         with self.connect() as connection:
@@ -157,9 +168,9 @@ class SnapshotDatabase:
                     timestamp, ndx_wdi, coverage_ratio, constituent_count,
                     missing_float_count, invalid_float_count, missing_reference_shares_count,
                     missing_price_count, status, weighting_basis, universe,
-                    reference_fund, holdings_as_of, source_failures,
+                    reference_fund, holdings_as_of, reference_data_as_of, source_failures,
                     holdings_source, market_data_source
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     timestamp,
@@ -175,6 +186,7 @@ class SnapshotDatabase:
                     universe,
                     reference_fund,
                     holdings_as_of,
+                    reference_data_as_of,
                     source_failures,
                     holdings_source,
                     market_data_source,
@@ -197,6 +209,10 @@ class SnapshotDatabase:
                         _sql_value(component.get("price")),
                         _sql_value(component.get("float_shares")),
                         _sql_value(component.get("reference_shares")),
+                        component.get("security_type", "Ordinary share"),
+                        component.get("reference_source"),
+                        _sql_value(component.get("acwi_weight")),
+                        component.get("acwi_listing"),
                         component.get("data_status", "valid"),
                     )
                 )
@@ -206,8 +222,9 @@ class SnapshotDatabase:
                     snapshot_id, ticker, company_name, actual_weight, float_weight,
                     counterfactual_weight, weight_delta, weight_ratio,
                     distortion_contribution, price, float_shares, reference_shares,
+                    security_type, reference_source, acwi_weight, acwi_listing,
                     data_status
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 rows,
             )

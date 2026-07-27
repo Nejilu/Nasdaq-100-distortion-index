@@ -7,9 +7,14 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
+from acwi_weights_provider import (
+    DEFAULT_ACWI_URL,
+    IsharesAcwiFloatWeightsProvider,
+    classify_security_types,
+)
 from database import SnapshotDatabase
 from distortion_engine import DistortionResult, calculate_distortion
-from market_data_provider import CsvMarketDataProvider, YFinanceMarketDataProvider
+from market_data_provider import YFinanceMarketDataProvider
 from qqq_holdings_provider import (
     DEFAULT_CNDX_URL,
     DEFAULT_EQQQ_URL,
@@ -22,10 +27,6 @@ from qqq_holdings_provider import (
 )
 
 
-ROOT = Path(__file__).resolve().parent
-SAMPLE_NON_UCITS_HOLDINGS = ROOT / "data" / "sample_qqq_holdings.csv"
-SAMPLE_UCITS_HOLDINGS = ROOT / "data" / "sample_ucits_holdings.csv"
-SAMPLE_MARKET_DATA = ROOT / "data" / "sample_market_data.csv"
 UNIVERSES = ("non_ucits", "ucits")
 
 
@@ -39,8 +40,8 @@ class RecomputeOutcome:
     universe: str = "non_ucits"
     reference_fund: str | None = None
     holdings_as_of: str | None = None
+    reference_data_as_of: str | None = None
     source_failures: tuple[str, ...] = ()
-    fallback_reason: str | None = None
 
     def summary(self) -> dict[str, object]:
         return {
@@ -58,69 +59,80 @@ class RecomputeOutcome:
             "universe": self.universe,
             "reference_fund": self.reference_fund,
             "holdings_as_of": self.holdings_as_of,
+            "reference_data_as_of": self.reference_data_as_of,
             "holdings_source": self.holdings_source,
             "market_data_source": self.market_data_source,
             "source_failures": list(self.source_failures),
-            "fallback_reason": self.fallback_reason,
         }
 
 
 def recompute_snapshot(
     *,
-    mode: str | None = None,
     db_path: str | Path | None = None,
     holdings_csv: str | Path | None = None,
     universe: str = "non_ucits",
     weighting_basis: str = "float",
 ) -> RecomputeOutcome:
-    """Compute and persist one snapshot in live, sample or automatic mode."""
-    selected_mode = (mode or os.getenv("NDX_DATA_MODE", "auto")).lower()
-    if selected_mode not in {"auto", "live", "sample"}:
-        raise ValueError("NDX_DATA_MODE doit valoir auto, live ou sample.")
+    """Compute and persist one snapshot from live holdings and market data."""
     if universe not in UNIVERSES:
-        raise ValueError(f"universe doit valoir l'une de ces valeurs: {UNIVERSES}.")
+        raise ValueError(f"universe must be one of: {UNIVERSES}.")
     if weighting_basis not in {"float", "total"}:
-        raise ValueError("weighting_basis doit valoir float ou total.")
+        raise ValueError("weighting_basis must be float or total.")
     database = SnapshotDatabase(db_path or os.getenv("NDX_DB_PATH", "data/ndx_wdi.sqlite3"))
     coverage_threshold = float(os.getenv("NDX_COVERAGE_THRESHOLD", "0.99"))
 
-    fallback_reason: str | None = None
-    source_failures: tuple[str, ...] = ()
-    holdings_as_of: str | None = None
-    if selected_mode == "sample":
-        result, holdings_source, market_source, reference_fund = _compute_sample(
-            coverage_threshold, universe, weighting_basis
+    holdings_provider = build_holdings_chain(universe, holdings_csv=holdings_csv)
+    market_provider = YFinanceMarketDataProvider(
+        max_workers=int(os.getenv("YFINANCE_MAX_WORKERS", "8")),
+        cache_dir=os.getenv("YFINANCE_CACHE_DIR", "data/yfinance_cache"),
+    )
+    holdings = holdings_provider.get_holdings()
+    source_failures = list(holdings_provider.failures)
+    holdings_as_of = holdings_provider.holdings_as_of
+    market_data = market_provider.get_market_data(holdings["ticker"].tolist())
+    reference_data_as_of = None
+    if weighting_basis == "float":
+        acwi_provider = IsharesAcwiFloatWeightsProvider(
+            url=os.getenv("ACWI_HOLDINGS_URL", DEFAULT_ACWI_URL),
+            timeout=int(os.getenv("HTTP_TIMEOUT_SECONDS", "30")),
         )
-    else:
         try:
-            holdings_provider = build_holdings_chain(universe, holdings_csv=holdings_csv)
-            market_provider = YFinanceMarketDataProvider(
-                max_workers=int(os.getenv("YFINANCE_MAX_WORKERS", "8")),
-                cache_dir=os.getenv("YFINANCE_CACHE_DIR", "data/yfinance_cache"),
-            )
-            holdings = holdings_provider.get_holdings()
-            source_failures = holdings_provider.failures
-            holdings_as_of = holdings_provider.holdings_as_of
-            market_data = market_provider.get_market_data(holdings["ticker"].tolist())
-            result = calculate_distortion(
-                holdings,
-                market_data,
-                coverage_threshold=coverage_threshold,
-                source_status="live",
-                weighting_basis=weighting_basis,
-            )
-            holdings_source = holdings_provider.source_name
-            reference_fund = holdings_provider.reference_fund
-            market_source = market_provider.source_name
+            references = acwi_provider.build_reference(holdings, market_data)
         except Exception as exc:
-            if selected_mode == "live":
-                raise
-            fallback_reason = f"{type(exc).__name__}: {exc}"
-            if "holdings_provider" in locals():
-                source_failures = holdings_provider.failures
-            result, holdings_source, market_source, reference_fund = _compute_sample(
-                coverage_threshold, universe, weighting_basis
+            source_failures.append(
+                f"{acwi_provider.source_name}: {type(exc).__name__}: {exc}"
             )
+            market_data = market_data.merge(
+                classify_security_types(holdings),
+                on="ticker",
+                how="left",
+            )
+            market_source = f"{market_provider.source_name}_global_fallback"
+        else:
+            market_data = market_data.merge(references, on="ticker", how="left")
+            reference_data_as_of = acwi_provider.holdings_as_of
+            reference_sources = set(
+                references["reference_source"].dropna().astype(str)
+            )
+            market_source = acwi_provider.source_name
+            if "yfinance_fallback" in reference_sources:
+                market_source += "+yfinance_fallback"
+    else:
+        market_data = market_data.merge(
+            classify_security_types(holdings),
+            on="ticker",
+            how="left",
+        )
+        market_data["reference_source"] = "yfinance_total_shares"
+        market_source = market_provider.source_name
+    result = calculate_distortion(
+        holdings,
+        market_data,
+        coverage_threshold=coverage_threshold,
+        weighting_basis=weighting_basis,
+    )
+    holdings_source = holdings_provider.source_name
+    reference_fund = holdings_provider.reference_fund
 
     timestamp = datetime.now(timezone.utc).isoformat()
     snapshot_id = database.save_snapshot(
@@ -129,6 +141,7 @@ def recompute_snapshot(
         universe=universe,
         reference_fund=reference_fund,
         holdings_as_of=holdings_as_of,
+        reference_data_as_of=reference_data_as_of,
         source_failures=" | ".join(source_failures) or None,
         holdings_source=holdings_source,
         market_data_source=market_source,
@@ -143,20 +156,18 @@ def recompute_snapshot(
         universe=universe,
         reference_fund=reference_fund,
         holdings_as_of=holdings_as_of,
-        source_failures=source_failures,
-        fallback_reason=fallback_reason,
+        reference_data_as_of=reference_data_as_of,
+        source_failures=tuple(source_failures),
     )
 
 
 def recompute_all_snapshots(
     *,
-    mode: str | None = None,
     db_path: str | Path | None = None,
     weighting_basis: str = "float",
 ) -> list[RecomputeOutcome]:
     return [
         recompute_snapshot(
-            mode=mode,
             db_path=db_path,
             universe=universe,
             weighting_basis=weighting_basis,
@@ -226,24 +237,3 @@ def build_holdings_chain(
             )
         )
     return HoldingsProviderChain(providers)
-
-
-def _compute_sample(
-    coverage_threshold: float, universe: str, weighting_basis: str
-) -> tuple[DistortionResult, str, str, str]:
-    path = SAMPLE_NON_UCITS_HOLDINGS if universe == "non_ucits" else SAMPLE_UCITS_HOLDINGS
-    reference_fund = "SAMPLE_QQQ" if universe == "non_ucits" else "SAMPLE_CNDX"
-    holdings_provider = CsvHoldingsProvider(
-        path, source_name=f"sample_{universe}_holdings", reference_fund=reference_fund
-    )
-    market_provider = CsvMarketDataProvider(SAMPLE_MARKET_DATA)
-    holdings = holdings_provider.get_holdings()
-    market_data = market_provider.get_market_data(holdings["ticker"].tolist())
-    result = calculate_distortion(
-        holdings,
-        market_data,
-        coverage_threshold=coverage_threshold,
-        source_status="sample_fallback",
-        weighting_basis=weighting_basis,
-    )
-    return result, holdings_provider.source_name, market_provider.source_name, reference_fund

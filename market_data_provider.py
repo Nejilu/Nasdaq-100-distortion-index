@@ -37,8 +37,7 @@ class YFinanceMarketDataProvider:
 
     @staticmethod
     def _fetch_one(ticker: str) -> dict[str, object]:
-        # Lazy import keeps core calculations and sample mode usable without
-        # yfinance/network access.
+        # Import lazily so pure calculation tests do not initialize yfinance.
         import yfinance as yf
 
         instrument = yf.Ticker(ticker)
@@ -78,20 +77,6 @@ class YFinanceMarketDataProvider:
                         }
                     )
         return _allocate_shared_float_shares(_normalize_market_data(pd.DataFrame(rows)))
-
-
-@dataclass
-class CsvMarketDataProvider:
-    """Local deterministic provider for offline development and tests."""
-
-    csv_path: str | Path
-    source_name: str = "sample_market_data"
-
-    def get_market_data(self, tickers: Sequence[str]) -> pd.DataFrame:
-        frame = pd.read_csv(self.csv_path)
-        frame["ticker"] = frame["ticker"].astype("string").str.upper().str.strip()
-        requested = {str(ticker).upper() for ticker in tickers}
-        return _normalize_market_data(frame.loc[frame["ticker"].isin(requested)].copy())
 
 
 def _normalize_market_data(frame: pd.DataFrame) -> pd.DataFrame:

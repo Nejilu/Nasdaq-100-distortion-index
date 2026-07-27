@@ -62,7 +62,7 @@ def test_provider_chain_rejects_top10_and_uses_complete_fallback():
     assert len(holdings) == 103
     assert chain.source_name == "iqq_full"
     assert chain.reference_fund == "IQQ"
-    assert "Nombre de constituants incohérent" in chain.failures[0]
+    assert "Unexpected constituent count" in chain.failures[0]
 
 
 def test_provider_chain_rejects_incomplete_published_weight_total():

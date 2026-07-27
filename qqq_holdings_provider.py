@@ -73,8 +73,8 @@ class InvescoQQQHoldingsProvider:
             )
             if response.status_code == 406:
                 raise RuntimeError(
-                    "Invesco refuse actuellement le téléchargement automatisé (HTTP 406). "
-                    "Utilisez QQQ_HOLDINGS_CSV, --holdings-csv ou le mode auto."
+                    "Invesco is currently rejecting automated downloads (HTTP 406). "
+                    "Use QQQ_HOLDINGS_CSV or --holdings-csv."
                 )
             response.raise_for_status()
             raw = response.text
@@ -83,10 +83,10 @@ class InvescoQQQHoldingsProvider:
 
 @dataclass
 class CsvHoldingsProvider:
-    """Local CSV provider used for offline development and deterministic demos."""
+    """Local provider for an explicitly supplied issuer holdings CSV."""
 
     csv_path: str | Path
-    source_name: str = "sample_qqq_holdings"
+    source_name: str = "local_holdings_csv"
     reference_fund: str = "local_csv"
 
     def get_holdings(self) -> pd.DataFrame:
@@ -114,7 +114,7 @@ class HttpCsvHoldingsProvider:
         )
         response.raise_for_status()
         if response.content.lstrip().lower().startswith(b"<!doctype html"):
-            raise ValueError("La source a renvoyé une page HTML au lieu d'un export de holdings.")
+            raise ValueError("The source returned an HTML page instead of a holdings export.")
         raw = response.content.decode("utf-8-sig", errors="replace")
         frame = parse_qqq_holdings_csv(raw)
         frame.attrs["holdings_as_of"] = _extract_as_of(raw)
@@ -149,7 +149,7 @@ class IsharesSpreadsheetXmlHoldingsProvider:
             None,
         )
         if worksheet is None:
-            raise ValueError("Onglet Holdings absent du téléchargement IQQ.")
+            raise ValueError("The IQQ download does not contain a Holdings worksheet.")
 
         rows = [
             [cell.get_text(" ", strip=True) for cell in row.find_all("ss:data")]
@@ -164,7 +164,7 @@ class IsharesSpreadsheetXmlHoldingsProvider:
             None,
         )
         if header_index is None:
-            raise ValueError("En-tête des holdings IQQ introuvable.")
+            raise ValueError("The IQQ holdings header could not be found.")
         header = rows[header_index]
         records = [row for row in rows[header_index + 1 :] if len(row) == len(header)]
         frame = parse_qqq_holdings_csv(pd.DataFrame(records, columns=header).to_csv(index=False))
@@ -208,7 +208,7 @@ class HoldingsProviderChain:
             except Exception as exc:
                 failures.append(f"{provider.source_name}: {type(exc).__name__}: {exc}")
         self.failures = tuple(failures)
-        raise RuntimeError("Aucune source de holdings complète. " + " | ".join(failures))
+        raise RuntimeError("No complete holdings source is available. " + " | ".join(failures))
 
 
 def validate_published_holdings(
@@ -220,23 +220,23 @@ def validate_published_holdings(
     """Reject partial/top-10 extracts and malformed published weights."""
     required = {"ticker", "company_name", "actual_weight"}
     if not required.issubset(holdings.columns):
-        raise ValueError(f"Colonnes manquantes: {sorted(required.difference(holdings.columns))}")
+        raise ValueError(f"Missing columns: {sorted(required.difference(holdings.columns))}")
     count = len(holdings)
     if count < min_constituents or count > max_constituents:
         raise ValueError(
-            f"Nombre de constituants incohérent ({count}); attendu entre "
-            f"{min_constituents} et {max_constituents}."
+            f"Unexpected constituent count ({count}); expected between "
+            f"{min_constituents} and {max_constituents}."
         )
     if holdings["ticker"].duplicated().any():
-        raise ValueError("Tickers dupliqués après normalisation.")
+        raise ValueError("Duplicate tickers remain after normalization.")
     published_total = holdings.attrs.get("published_weight_total")
     if published_total is not None and not 0.95 <= float(published_total) <= 1.05:
         raise ValueError(
-            f"Les poids publiés ne couvrent que {float(published_total):.2%} du fonds."
+            f"Published weights cover only {float(published_total):.2%} of the fund."
         )
     total = float(holdings["actual_weight"].sum())
     if abs(total - 1.0) > 1e-9:
-        raise ValueError(f"La somme des poids publiés vaut {total}, pas 1.")
+        raise ValueError(f"Published weights sum to {total}, not 1.")
 
 
 def _extract_as_of(raw: str) -> str | None:
@@ -267,7 +267,10 @@ def _select_column(frame: pd.DataFrame, candidates: set[str], required: bool = T
         if candidate in columns:
             return columns[candidate]
     if required:
-        raise ValueError(f"Colonne introuvable parmi {sorted(candidates)}. Colonnes reçues: {list(frame.columns)}")
+        raise ValueError(
+            f"None of the columns {sorted(candidates)} were found. "
+            f"Received columns: {list(frame.columns)}"
+        )
     return None
 
 
@@ -279,7 +282,7 @@ def parse_qqq_holdings_csv(raw: str) -> pd.DataFrame:
     """
     frame = pd.read_csv(StringIO(raw), skiprows=_find_header_row(raw))
     if frame.empty:
-        raise ValueError("Le fichier de holdings QQQ est vide.")
+        raise ValueError("The QQQ holdings file is empty.")
 
     ticker_col = _select_column(frame, {"ticker", "holdingsticker", "symbol"})
     name_col = _select_column(frame, {"name", "holdingname", "companyname", "description"}, required=False)
@@ -318,7 +321,7 @@ def parse_qqq_holdings_csv(raw: str) -> pd.DataFrame:
     result = result.loc[~non_security_ticker].copy()
     result = result.loc[result["raw_weight"].notna() & (result["raw_weight"] > 0)].copy()
     if result.empty:
-        raise ValueError("Aucune position action valide dans les holdings QQQ.")
+        raise ValueError("The QQQ holdings contain no valid equity positions.")
 
     # Issuer exports normally use percentages (e.g. 8.7). Compatible test files
     # may already use decimals. Detect the scale without silently altering rows.
@@ -331,7 +334,7 @@ def parse_qqq_holdings_csv(raw: str) -> pd.DataFrame:
     )
     total = float(result["raw_weight"].sum())
     if total <= 0:
-        raise ValueError("La somme des poids actions QQQ doit être positive.")
+        raise ValueError("The sum of QQQ equity weights must be positive.")
     result["actual_weight"] = result["raw_weight"] / total
     normalized = result[["ticker", "company_name", "actual_weight"]].reset_index(drop=True)
     normalized.attrs["published_weight_total"] = total
