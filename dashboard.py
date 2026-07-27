@@ -643,16 +643,21 @@ def _render_rebalance_controls(snapshot: dict[str, object]) -> bool:
                 applies Nasdaq listing tier, non-financial classification, security
                 type, three-month liquidity and seasoning or fast-entry rules.
 
-                For direct ACWI matches, initial weights use:
+                For direct ACWI matches, modified-capitalization inputs use:
                 `min(converted listed total cap, 3 x ACWI free-float mass)`.
                 The conversion is calibrated from ACWI market values and listed
                 total capitalizations. Yahoo `floatShares` is used only when ACWI
                 cannot provide a direct reference.
 
-                This quarterly simulation applies the company-level 24%/20% rule
-                and the 4.5%-48%/40% cohort rule. The **38.5% rule does not apply
-                here**: it is the annual December security-level rule for the top
-                five securities when their combined weight reaches 40%.
+                Quarterly initial weights preserve current published tracker
+                weights as a public proxy for Nasdaq Index Shares. Entrants use
+                Nasdaq's modified-cap rank interpolation. The 24% and 48%
+                concentration tests are evaluated before any 20% or 40%
+                redistribution is applied.
+
+                The **38.5% rule does not apply here**: it is the annual December
+                security-level rule for the top five securities when their
+                combined weight reaches 40%.
                 """
             )
             additions = _parse_json_list(snapshot.get("rebalance_additions"))
@@ -669,10 +674,10 @@ def _render_rebalance_controls(snapshot: dict[str, object]) -> bool:
                 """
             )
             st.caption(
-                "Weight constraints are deterministic. Composition is a public-data "
-                "simulation, not an official Nasdaq review: Nasdaq discretion and "
-                "some proprietary eligibility inputs cannot be independently "
-                "replicated."
+                "Weight constraints are deterministic. Composition and quarterly "
+                "Index Shares are public-data proxies, not an official Nasdaq "
+                "review: accumulated TSO changes and some proprietary eligibility "
+                "inputs cannot be independently replicated."
             )
             st.markdown(
                 "[Official Nasdaq-100 methodology]"

@@ -95,7 +95,8 @@ The daily pipeline:
    seasoning, rank-125 replacement, and top-40 fast-entry rules.
    Non-constituent ADRs are excluded unless primary-listing and listed
    depositary-share inputs can be verified.
-4. Calculates each security's modified-capitalization mass:
+4. Calculates each security's modified-capitalization mass for low-float
+   adjustments, entrant ranking/interpolation, and any triggered recapping:
 
    ```text
    acwi_conversion_scale =
@@ -109,15 +110,21 @@ The daily pipeline:
    ACWI names whose free float is close to 100%. Direct ACWI matches never use
    yfinance `floatShares`. For ADR/ADS securities or absent ACWI positions,
    yfinance free float remains a documented fallback.
-5. Aggregates securities by company and applies the current **quarterly**
-   concentration stages: a triggered weight above 24% is adjusted to 20%, then
-   a triggered aggregate of companies above 4.5% is adjusted from at least 48%
-   to 40%. Uncapped names share a common proportional adjustment factor and
-   initial rank is preserved.
+5. Preserves current published tracker weights as a public proxy for inherited
+   Nasdaq Index Shares. Nasdaq adjusts those shares for accumulated TSO and
+   low-float changes at quarterly reviews; exact prior Index Shares are
+   proprietary, so that delta cannot be reconstructed perfectly from public
+   data. New constituents receive a linearly interpolated weight based on their
+   modified-capitalization rank.
+6. Aggregates securities by company and first evaluates the current
+   **quarterly** concentration tests. Only when a company exceeds 24%, or the
+   aggregate of companies above 4.5% reaches 48%, does the corresponding
+   20%/40% redistribution run. Uncapped names share a common proportional
+   adjustment factor and initial rank is preserved.
    The 38.5% constraint is not part of this quarterly calculation. It is the
    separate annual December security-level rule: if the five largest securities
    total at least 40%, their aggregate is adjusted to 38.5%.
-6. Compares the resulting security weights with the selected free-float or
+7. Compares the resulting security weights with the selected free-float or
    total-cap reference and recalculates `NDX_WDI`.
 
 The dashboard displays this score beside the live reading. Enabling **Show
@@ -310,6 +317,16 @@ python -m streamlit run dashboard.py
 
 - Interactive API: `http://127.0.0.1:8000/docs`
 - Dashboard: `http://localhost:8501`
+
+On Windows, both services can instead be launched as detached background
+processes:
+
+```powershell
+.\.venv\Scripts\python.exe run_local.py
+```
+
+The launcher returns immediately, prints the process IDs, and skips services
+whose ports are already listening. Runtime output is written under `data/`.
 
 The dashboard provides matching segmented controls for:
 

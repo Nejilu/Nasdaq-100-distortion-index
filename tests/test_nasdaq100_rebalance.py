@@ -159,6 +159,58 @@ def test_rebalance_uses_modified_cap_ratio_and_calculates_new_wdi():
     assert result.ndx_wdi > 0
 
 
+def test_quarterly_rebalance_does_not_recap_when_current_constraints_pass():
+    tickers = ["A", "B"] + [f"S{i}" for i in range(24)]
+    holdings = pd.DataFrame(
+        {
+            "ticker": tickers,
+            "company_name": tickers,
+            "actual_weight": [0.08, 0.08] + [0.84 / 24] * 24,
+        }
+    )
+    securities = pd.DataFrame(
+        {
+            "ticker": tickers,
+            "company_name": tickers,
+            "company_id": tickers,
+            "security_type": ["Ordinary share"] * len(tickers),
+            "is_current": [True] * len(tickers),
+            "selected": [True] * len(tickers),
+        }
+    )
+    selection = SelectionResult(
+        securities=securities,
+        selected_tickers=tuple(tickers),
+        selected_company_ids=tuple(tickers),
+        additions=(),
+        removals=(),
+        status="test",
+        source="test",
+        as_of="2026-07-27",
+        eligible_company_count=len(tickers),
+    )
+    reference = pd.DataFrame(
+        {
+            "ticker": tickers,
+            # A would exceed 24% if quarterly weights were incorrectly reset
+            # from raw modified capitalization.
+            "reference_weight_raw": [50.0, 10.0] + [40.0 / 24] * 24,
+            "float_shares": [50.0, 10.0] + [40.0 / 24] * 24,
+            "shares_outstanding": [50.0, 10.0] + [40.0 / 24] * 24,
+        }
+    )
+
+    result = simulate_rebalance(holdings, reference, selection)
+    components = result.components.set_index("ticker")
+
+    assert math.isclose(components.loc["A", "rebalance_weight"], 0.08)
+    assert math.isclose(components.loc["B", "rebalance_weight"], 0.08)
+    assert result.method == "quarterly_index_shares_then_modified_cap_2026"
+    assert any(
+        "no 40% cohort redistribution" in note for note in result.notes
+    )
+
+
 def test_direct_acwi_conversion_ignores_bad_yfinance_float_shares():
     tickers = (
         [f"FULL{i}" for i in range(20)]

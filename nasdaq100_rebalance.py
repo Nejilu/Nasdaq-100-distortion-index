@@ -728,19 +728,50 @@ def simulate_rebalance(
         "rebalance_input_status",
     ] = "current_weight_modified_cap_fallback"
 
-    weighting_valid = data["selected"] & data["modified_market_cap_mass"].gt(0)
+    quarterly_existing = (
+        rebalance_type == "quarterly"
+    ) & data["is_current"] & data["actual_weight"].gt(0)
+    weighting_valid = data["selected"] & (
+        data["modified_market_cap_mass"].gt(0) | quarterly_existing
+    )
     score_valid = weighting_valid & data["counterfactual_reference_raw"].gt(0)
     if not weighting_valid.any():
         raise ValueError("No selected security has a valid rebalance reference mass.")
 
     valid = data.loc[weighting_valid].copy()
-    security_initial = valid.set_index("ticker")["modified_market_cap_mass"]
-    security_initial = security_initial / security_initial.sum()
+    if rebalance_type == "quarterly":
+        security_initial = build_quarterly_index_share_weights(valid)
+    else:
+        security_initial = valid.set_index("ticker")["modified_market_cap_mass"]
+        security_initial = security_initial / security_initial.sum()
     company_initial = (
         valid.assign(initial_weight=valid["ticker"].map(security_initial))
         .groupby("company_id")["initial_weight"]
         .sum()
     )
+    quarterly_recap_triggered = (
+        rebalance_type == "quarterly"
+        and company_capping_required(company_initial)
+    )
+    if quarterly_recap_triggered:
+        raw_valid = valid.loc[valid["modified_market_cap_mass"].gt(0)].copy()
+        if raw_valid.empty:
+            raise ValueError(
+                "Quarterly concentration limits were breached, but no valid "
+                "modified-capitalization inputs are available."
+            )
+        security_initial = raw_valid.set_index("ticker")[
+            "modified_market_cap_mass"
+        ]
+        security_initial = security_initial / security_initial.sum()
+        valid = raw_valid
+        weighting_valid = data["ticker"].isin(valid["ticker"])
+        score_valid = weighting_valid & data["counterfactual_reference_raw"].gt(0)
+        company_initial = (
+            valid.assign(initial_weight=valid["ticker"].map(security_initial))
+            .groupby("company_id")["initial_weight"]
+            .sum()
+        )
     company_final = apply_company_capping(company_initial)
     company_scale = company_final / company_initial
     security_final = security_initial * valid.set_index("ticker")["company_id"].map(
@@ -803,6 +834,24 @@ def simulate_rebalance(
             f"of {conversion_scale:.8g}, calibrated on {conversion_count} "
             "matched securities; yfinance floatShares is not used for them."
         )
+    if rebalance_type == "quarterly":
+        notes.append(
+            "Quarterly initial weights preserve current published index weights "
+            "as a public proxy for Nasdaq Index Shares. Exact accumulated TSO "
+            "changes since the previous update require proprietary prior Index "
+            "Shares and are not independently reproducible."
+        )
+        if quarterly_recap_triggered:
+            notes.append(
+                "The quarterly 24%/48% concentration test was breached, so the "
+                "company-level adjustment was recalculated from modified market "
+                "capitalization."
+            )
+        else:
+            notes.append(
+                "The quarterly 24%/48% concentration test was not breached; no "
+                "40% cohort redistribution was applied."
+            )
     if input_fallbacks:
         notes.append(
             f"{input_fallbacks} securities used a documented modified-cap fallback "
@@ -819,7 +868,11 @@ def simulate_rebalance(
         coverage_ratio=coverage,
         constituent_count=int(weighting_valid.sum()),
         status=status,
-        method=f"{rebalance_type}_modified_market_cap_2026",
+        method=(
+            "quarterly_index_shares_then_modified_cap_2026"
+            if rebalance_type == "quarterly"
+            else "annual_modified_market_cap_2026"
+        ),
         reference_date=selection.as_of,
         additions=selection.additions,
         removals=selection.removals,
@@ -865,6 +918,69 @@ def derive_acwi_total_cap_conversion(
     if len(ratios) < minimum_pairs:
         return None, int(len(ratios))
     return float(ratios.quantile(quantile)), int(len(ratios))
+
+
+def build_quarterly_index_share_weights(data: pd.DataFrame) -> pd.Series:
+    """Build quarterly initial weights from inherited Index Shares.
+
+    Published tracker weights proxy current price times Nasdaq Index Shares.
+    New constituents are inserted by Nasdaq's linear weight interpolation rule
+    using their modified-capitalization rank.
+    """
+    indexed = data.set_index("ticker", drop=False)
+    existing = indexed.loc[
+        indexed["is_current"].fillna(False).astype(bool)
+        & indexed["actual_weight"].gt(0)
+    ]
+    weights = existing["actual_weight"].astype(float).copy()
+    masses = pd.to_numeric(
+        indexed["modified_market_cap_mass"], errors="coerce"
+    )
+
+    additions = indexed.loc[
+        ~indexed.index.isin(weights.index) & masses.gt(0)
+    ].sort_values("modified_market_cap_mass", ascending=False)
+    for ticker, row in additions.iterrows():
+        mass = float(row["modified_market_cap_mass"])
+        peers = pd.DataFrame(
+            {
+                "mass": masses.reindex(weights.index),
+                "weight": weights,
+            }
+        ).dropna()
+        larger = peers.loc[peers["mass"].gt(mass)].sort_values("mass").head(1)
+        smaller = peers.loc[peers["mass"].lt(mass)].sort_values(
+            "mass", ascending=False
+        ).head(1)
+
+        if not larger.empty and not smaller.empty:
+            x1, y1 = map(float, larger.iloc[0][["mass", "weight"]])
+            x0, y0 = map(float, smaller.iloc[0][["mass", "weight"]])
+            interpolated = y0 + (mass - x0) * (y1 - y0) / (x1 - x0)
+        elif not larger.empty:
+            x1, y1 = map(float, larger.iloc[0][["mass", "weight"]])
+            interpolated = y1 * mass / x1
+        elif not smaller.empty:
+            x0, y0 = map(float, smaller.iloc[0][["mass", "weight"]])
+            interpolated = y0 * mass / x0
+        else:
+            interpolated = mass
+        weights.loc[ticker] = max(float(interpolated), np.finfo(float).eps)
+
+    if weights.empty:
+        fallback = masses.loc[masses.gt(0)]
+        if fallback.empty:
+            raise ValueError("No quarterly Index Share proxy is available.")
+        weights = fallback
+    return weights / weights.sum()
+
+
+def company_capping_required(initial_weights: pd.Series) -> bool:
+    """Return whether quarterly company concentration adjustment is required."""
+    weights = _normalize_positive(initial_weights)
+    if weights.gt(0.24 + 1e-12).any():
+        return True
+    return float(weights.loc[weights.gt(0.045 + 1e-12)].sum()) >= 0.48 - 1e-12
 
 
 def apply_company_capping(initial_weights: pd.Series) -> pd.Series:
