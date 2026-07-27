@@ -126,6 +126,36 @@ def test_live_snapshot_roundtrip(tmp_path, live_sources):
     assert all(row["rebalance_weight"] is not None for row in components)
 
 
+def test_rebalance_failure_preserves_live_snapshot(
+    tmp_path,
+    monkeypatch,
+    live_sources,
+):
+    path = tmp_path / "rebalance-failure.sqlite3"
+
+    def fail_rebalance(*_args, **_kwargs):
+        raise ValueError("No valid modified-cap inputs")
+
+    monkeypatch.setattr(snapshot_service, "simulate_rebalance", fail_rebalance)
+
+    outcome = recompute_snapshot(db_path=path)
+    database = SnapshotDatabase(path)
+    current = database.get_current()
+    components = database.get_components()
+
+    assert outcome.rebalance is None
+    assert outcome.result.snapshot_status == "complete"
+    assert current is not None
+    assert current["status"] == "complete"
+    assert current["rebalance_ndx_wdi"] is None
+    assert current["rebalance_status"] is None
+    assert (
+        "Nasdaq annual reconstitution: ValueError: "
+        "No valid modified-cap inputs"
+    ) in current["source_failures"]
+    assert all(row["rebalance_weight"] is None for row in components)
+
+
 def test_minimal_api(tmp_path, monkeypatch, live_sources):
     path = tmp_path / "api.sqlite3"
     monkeypatch.setenv("NDX_DB_PATH", str(path))

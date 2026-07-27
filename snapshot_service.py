@@ -222,16 +222,26 @@ def recompute_snapshot(
         coverage_threshold=coverage_threshold,
         weighting_basis=weighting_basis,
     )
-    rebalance = simulate_rebalance(
-        holdings,
-        rebalance_reference,
-        selection,
-        rebalance_type="annual",
-    )
-    result = replace(
-        result,
-        components=_merge_rebalance_components(result.components, rebalance.components),
-    )
+    rebalance: RebalanceResult | None = None
+    try:
+        rebalance = simulate_rebalance(
+            holdings,
+            rebalance_reference,
+            selection,
+            rebalance_type="annual",
+        )
+    except Exception as exc:
+        source_failures.append(
+            f"Nasdaq annual reconstitution: {type(exc).__name__}: {exc}"
+        )
+    else:
+        result = replace(
+            result,
+            components=_merge_rebalance_components(
+                result.components,
+                rebalance.components,
+            ),
+        )
     holdings_source = holdings_provider.source_name
     reference_fund = holdings_provider.reference_fund
 

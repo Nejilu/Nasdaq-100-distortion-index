@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import socket
 import subprocess
 import sys
@@ -9,7 +10,7 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parent
-PYTHON = ROOT / ".venv" / "Scripts" / "python.exe"
+PYTHON = Path(sys.executable)
 DATA_DIR = ROOT / "data"
 SERVICES = (
     (
@@ -48,6 +49,20 @@ def _port_is_open(port: int) -> bool:
         return connection.connect_ex(("127.0.0.1", port)) == 0
 
 
+def _process_creation_options(
+    platform_name: str | None = None,
+) -> dict[str, int | bool]:
+    platform_name = platform_name or os.name
+    if platform_name == "nt":
+        flags = (
+            subprocess.CREATE_NEW_PROCESS_GROUP
+            | subprocess.DETACHED_PROCESS
+            | subprocess.CREATE_NO_WINDOW
+        )
+        return {"creationflags": flags}
+    return {"creationflags": 0, "start_new_session": True}
+
+
 def _start_service(
     name: str,
     port: int,
@@ -59,11 +74,6 @@ def _start_service(
         print(f"{name}: already running on http://127.0.0.1:{port}")
         return
 
-    flags = (
-        subprocess.CREATE_NEW_PROCESS_GROUP
-        | subprocess.DETACHED_PROCESS
-        | subprocess.CREATE_NO_WINDOW
-    )
     with (
         (DATA_DIR / stdout_name).open("ab") as stdout,
         (DATA_DIR / stderr_name).open("ab") as stderr,
@@ -75,7 +85,7 @@ def _start_service(
             stdout=stdout,
             stderr=stderr,
             close_fds=True,
-            creationflags=flags,
+            **_process_creation_options(),
         )
     print(f"{name}: started PID {process.pid} on http://127.0.0.1:{port}")
 

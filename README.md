@@ -316,15 +316,16 @@ python -m streamlit run dashboard.py
 - Interactive API: `http://127.0.0.1:8000/docs`
 - Dashboard: `http://localhost:8501`
 
-On Windows, both services can instead be launched as detached background
-processes:
+Both services can instead be launched as detached background processes with
+the active Python environment:
 
-```powershell
-.\.venv\Scripts\python.exe run_local.py
+```bash
+python run_local.py
 ```
 
 The launcher returns immediately, prints the process IDs, and skips services
-whose ports are already listening. Runtime output is written under `data/`.
+whose ports are already listening. It uses detached Windows processes or a new
+POSIX session as appropriate. Runtime output is written under `data/`.
 
 The dashboard provides matching segmented controls for:
 
