@@ -14,6 +14,10 @@ from dotenv import load_dotenv
 
 from active_share import calculate_active_share_sleeves
 from database import SnapshotDatabase
+from rebalance_analytics import (
+    AnnualRebalanceAnalysis,
+    analyze_annual_rebalance,
+)
 from snapshot_service import recompute_snapshot
 
 
@@ -566,8 +570,10 @@ def _render_method_help(weighting_basis: str) -> None:
 
                 ACWI matches are selected for Nasdaq-100 constituents and normalized
                 to 100%. ADR/ADS securities and ACWI absences use a calibrated
-                yfinance fallback. Each valid fallback is converted into ACWI
-                fund-value units with the median conversion ratio from matched names.
+                fallback converted into ACWI fund-value units with the median ratio
+                from matched names. The Nasdaq-listed ASML ADR uses a maintained
+                override of 88 million floating ADRs because yfinance's consolidated
+                float is inconsistent with that listing.
 
                 Free-float adjustment is also used by major investable benchmarks such
                 as the [S&P 500](https://www.spglobal.com/spdji/en/methodology/article/sp-us-indices-methodology/)
@@ -612,6 +618,31 @@ def _render_active_share_help() -> None:
         )
 
 
+def _render_annual_reconstitution_help() -> None:
+    with st.popover(
+        "Annual review method",
+        icon=":material/help:",
+        width="stretch",
+    ):
+        st.markdown(
+            """
+            The panel reconstructs the full annual December review from the
+            persisted public-data simulation.
+
+            Initial weights use **Modified Market Capitalization**. Listed TSO
+            is limited to three times free-float shares. Company constraints
+            are then applied before security-level constraints.
+
+            Selection follows the official top-75/100/125 sequence, but public
+            membership is only a proxy for Nasdaq's non-public prior-review
+            flags and discretionary inputs.
+
+            - [Nasdaq-100 methodology](https://indexes.nasdaqomx.com/docs/Methodology_NDX.pdf)
+            - [Nasdaq weight calculations](https://indexes.nasdaqomx.com/docs/Nasdaq_Index_Weight_Calculations.pdf)
+            """
+        )
+
+
 def _render_score_strip(
     snapshot: dict[str, object],
     components: pd.DataFrame,
@@ -634,7 +665,15 @@ def _render_score_strip(
         else "Refresh to calculate"
     )
     valid_fallbacks = int(
-        components["data_status"].astype("string").eq("valid_yfinance_fallback").sum()
+        components["data_status"]
+        .astype("string")
+        .isin(
+            [
+                "valid_yfinance_fallback",
+                "valid_hardcoded_float_override",
+            ]
+        )
+        .sum()
     )
     if weighting_basis == "float":
         fourth_label = "Fallbacks"
@@ -1571,6 +1610,878 @@ def _render_weight_difference_chart(
     st.plotly_chart(figure, width="stretch", config={"displayModeBar": False})
 
 
+def _render_annual_reconstitution_summary(
+    snapshot: dict[str, object],
+    analysis: AnnualRebalanceAnalysis,
+) -> None:
+    score = float(snapshot["rebalance_ndx_wdi"])
+    membership = (
+        f"{len(analysis.companies)} companies / "
+        f"{len(analysis.securities)} securities"
+    )
+    movement = (
+        f"{len(analysis.additions)} in / {len(analysis.removals)} out"
+    )
+    st.markdown(
+        f"""
+        <div class="ndx-active-strip">
+          <div class="ndx-active-main">
+            <div class="ndx-eyebrow">Annual reconstitution today</div>
+            <div class="ndx-active-value">{score:.2f}</div>
+            <div class="ndx-score-context">Simulated post-review NDX_WDI</div>
+          </div>
+          <div class="ndx-active-meaning">
+            <strong>{analysis.total_capping_redistribution:.2%} of weight</strong>
+            is moved by the annual capping rules relative to raw Modified
+            Market Cap weights.
+          </div>
+          <div class="ndx-stat">
+            <div class="ndx-stat-label">Current-to-review turnover</div>
+            <div class="ndx-stat-value">
+              {analysis.current_to_final_turnover:.2%}
+            </div>
+            <div class="ndx-stat-subvalue">{html.escape(movement)}</div>
+          </div>
+          <div class="ndx-stat">
+            <div class="ndx-stat-label">Selected universe</div>
+            <div class="ndx-stat-value">{html.escape(membership)}</div>
+            <div class="ndx-stat-subvalue">
+              reference {html.escape(str(snapshot.get("rebalance_reference_date") or "n/a"))}
+            </div>
+          </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def _render_annual_thresholds(
+    analysis: AnnualRebalanceAnalysis,
+) -> None:
+    thresholds = analysis.thresholds.copy()
+    thresholds["status_label"] = np.where(
+        thresholds["triggered"],
+        "RULE ACTIVE",
+        "NOT TRIGGERED",
+    )
+    thresholds["distance_label"] = thresholds["distance_to_trigger"].map(
+        lambda value: (
+            f"{value * 100:.2f} pp buffer"
+            if value >= 0
+            else f"{abs(value) * 100:.2f} pp over trigger"
+        )
+    )
+    thresholds["color"] = thresholds["triggered"].map(
+        {True: NDX_ACTIVE_COLOR, False: "#268463"}
+    )
+    axis_maximum = max(
+        0.60,
+        float(
+            thresholds[["actual", "threshold", "target"]]
+            .to_numpy()
+            .max()
+        )
+        * 1.08,
+    )
+    figure = go.Figure()
+
+    for _, row in thresholds.iterrows():
+        figure.add_trace(
+            go.Scatter(
+                x=[0.0, axis_maximum],
+                y=[row["label"], row["label"]],
+                mode="lines",
+                line={"color": THEME["chart_grid"], "width": 10},
+                hoverinfo="skip",
+                showlegend=False,
+            )
+        )
+        figure.add_trace(
+            go.Scatter(
+                x=[row["target"], row["threshold"]],
+                y=[row["label"], row["label"]],
+                mode="lines",
+                line={"color": "#d69a2d", "width": 10},
+                opacity=0.18,
+                hoverinfo="skip",
+                showlegend=False,
+            )
+        )
+
+    figure.add_trace(
+        go.Scatter(
+            x=thresholds["target"],
+            y=thresholds["label"],
+            mode="markers+text",
+            name="Adjustment target",
+            marker={
+                "color": "#268463",
+                "size": 11,
+                "symbol": "square",
+                "line": {"color": THEME["marker_outline"], "width": 1},
+            },
+            text=thresholds["target"].map(lambda value: f"{value:.1%}"),
+            textposition="bottom center",
+            textfont={"color": "#268463", "size": 10},
+            customdata=thresholds[["rule"]].to_numpy(),
+            hovertemplate=(
+                "<b>%{y}</b><br>"
+                "Adjustment target: %{x:.2%}<br>"
+                "%{customdata[0]}<extra></extra>"
+            ),
+        )
+    )
+    figure.add_trace(
+        go.Scatter(
+            x=thresholds["threshold"],
+            y=thresholds["label"],
+            mode="markers+text",
+            name="Official trigger",
+            marker={
+                "color": "#d69a2d",
+                "size": 13,
+                "symbol": "diamond",
+                "line": {"color": THEME["marker_outline"], "width": 1},
+            },
+            text=thresholds["threshold"].map(lambda value: f"{value:.1%}"),
+            textposition="top center",
+            textfont={"color": "#d69a2d", "size": 10},
+            customdata=thresholds[["rule"]].to_numpy(),
+            hovertemplate=(
+                "<b>%{y}</b><br>"
+                "Official trigger: %{x:.2%}<br>"
+                "%{customdata[0]}<extra></extra>"
+            ),
+        )
+    )
+    figure.add_trace(
+        go.Scatter(
+            x=thresholds["actual"],
+            y=thresholds["label"],
+            mode="markers",
+            name="Observed",
+            marker={
+                "color": thresholds["color"],
+                "size": 20,
+                "symbol": "circle",
+                "line": {"color": THEME["marker_outline"], "width": 1.5},
+            },
+            customdata=thresholds[
+                [
+                    "threshold",
+                    "target",
+                    "status_label",
+                    "distance_label",
+                    "rule",
+                ]
+            ].to_numpy(),
+            hovertemplate=(
+                "<b>%{y}</b><br>"
+                "Observed input: %{x:.2%}<br>"
+                "Trigger: %{customdata[0]:.2%}<br>"
+                "Adjustment target: %{customdata[1]:.2%}<br>"
+                "%{customdata[2]} - %{customdata[3]}<br>"
+                "%{customdata[4]}<extra></extra>"
+            ),
+        )
+    )
+    for _, row in thresholds.iterrows():
+        status_color = row["color"]
+        figure.add_annotation(
+            x=1.015,
+            y=row["label"],
+            xref="paper",
+            yref="y",
+            text=(
+                f"<b>Observed {row['actual']:.2%}</b><br>"
+                f"<span style='color:{status_color}'>"
+                f"{row['status_label']} · {row['distance_label']}</span>"
+            ),
+            showarrow=False,
+            xanchor="left",
+            align="left",
+            font={"color": THEME["chart_font"], "size": 10},
+        )
+
+    figure.update_layout(
+        template="plotly_dark" if IS_DARK_MODE else "plotly_white",
+        height=390,
+        margin={"l": 8, "r": 220, "t": 52, "b": 42},
+        legend={
+            "orientation": "h",
+            "yanchor": "bottom",
+            "y": 1.06,
+            "xanchor": "left",
+            "x": 0,
+            "font": {"color": THEME["chart_font"], "size": 10},
+        },
+        paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor="rgba(0,0,0,0)",
+        font={"color": THEME["chart_font"], "size": 11},
+        xaxis={
+            "title": "Rule input as a share of index weight",
+            "tickformat": ".0%",
+            "range": [0, axis_maximum],
+            "gridcolor": THEME["chart_grid"],
+            "zeroline": False,
+        },
+        yaxis={
+            "title": None,
+            "showgrid": False,
+            "autorange": "reversed",
+        },
+    )
+    st.subheader("Annual capping rule map")
+    st.caption(
+        "Circle: observed concentration. Diamond: official trigger. Square: "
+        "weight target applied when the rule activates. The highlighted band "
+        "connects each target to its trigger."
+    )
+    st.plotly_chart(
+        figure,
+        width="stretch",
+        config={"displayModeBar": False},
+    )
+
+
+def _annual_company_cohort_figure(
+    analysis: AnnualRebalanceAnalysis,
+) -> go.Figure:
+    companies = analysis.companies.sort_values(
+        "stage_one_weight",
+        ascending=False,
+    ).copy()
+    companies["rank"] = np.arange(1, len(companies) + 1)
+    companies["qualifies"] = companies["stage_one_weight"].gt(0.045 + 1e-12)
+    cohort = companies.loc[companies["qualifies"]].copy()
+    cohort["cohort_cumulative"] = cohort["stage_one_weight"].cumsum()
+    point_colors = np.where(
+        companies["qualifies"],
+        NDX_ACTIVE_COLOR,
+        SPX_ACTIVE_COLOR,
+    )
+    point_sizes = 7 + 27 * (
+        companies["stage_one_weight"] / companies["stage_one_weight"].max()
+    )
+
+    figure = go.Figure()
+    figure.add_trace(
+        go.Scatter(
+            x=companies["rank"],
+            y=companies["stage_one_weight"],
+            mode="lines+markers",
+            name="Weight entering the 4.5% test",
+            line={"color": SPX_ACTIVE_COLOR, "width": 2},
+            fill="tozeroy",
+            fillcolor="rgba(47,95,152,0.08)",
+            marker={
+                "color": point_colors,
+                "size": point_sizes,
+                "opacity": 0.86,
+                "line": {"color": THEME["marker_outline"], "width": 0.8},
+            },
+            customdata=companies[
+                [
+                    "company_name",
+                    "tickers",
+                    "initial_weight",
+                    "final_weight",
+                    "capping_change",
+                    "qualifies",
+                ]
+            ].to_numpy(),
+            hovertemplate=(
+                "Modified Market Cap rank %{x}<br>"
+                "<b>%{customdata[0]}</b> (%{customdata[1]})<br>"
+                "Raw Modified Market Cap weight: %{customdata[2]:.2%}<br>"
+                "Weight entering cohort test: %{y:.2%}<br>"
+                "Final company weight: %{customdata[3]:.2%}<br>"
+                "Capping change: %{customdata[4]:+.2%}<br>"
+                "Above 4.5%: %{customdata[5]}<extra></extra>"
+            ),
+        )
+    )
+    if not cohort.empty:
+        figure.add_trace(
+            go.Scatter(
+                x=cohort["rank"],
+                y=cohort["cohort_cumulative"],
+                mode="lines+markers",
+                name="Cumulative >4.5% cohort",
+                yaxis="y2",
+                line={"color": NDX_ACTIVE_COLOR, "width": 3},
+                marker={
+                    "color": NDX_ACTIVE_COLOR,
+                    "size": 8,
+                    "line": {
+                        "color": THEME["marker_outline"],
+                        "width": 0.8,
+                    },
+                },
+                customdata=cohort[
+                    ["company_name", "tickers", "stage_one_weight"]
+                ].to_numpy(),
+                hovertemplate=(
+                    "Cohort member %{x}<br>"
+                    "<b>%{customdata[0]}</b> (%{customdata[1]})<br>"
+                    "Company weight: %{customdata[2]:.2%}<br>"
+                    "Cumulative cohort weight: %{y:.2%}<extra></extra>"
+                ),
+            )
+        )
+        last_rank = int(cohort["rank"].max())
+        for value, color, label, dash in [
+            (0.48, "#d69a2d", "48% trigger", "dash"),
+            (0.40, "#268463", "40% target", "dot"),
+        ]:
+            figure.add_shape(
+                type="line",
+                x0=0.7,
+                x1=last_rank + 0.3,
+                y0=value,
+                y1=value,
+                xref="x",
+                yref="y2",
+                line={"color": color, "width": 1.5, "dash": dash},
+            )
+            figure.add_annotation(
+                x=last_rank + 0.45,
+                y=value,
+                xref="x",
+                yref="y2",
+                text=label,
+                showarrow=False,
+                xanchor="left",
+                font={"color": color, "size": 10},
+            )
+        figure.add_vline(
+            x=last_rank + 0.5,
+            line_width=1,
+            line_dash="dot",
+            line_color=THEME["chart_zero"],
+            annotation_text=f"{len(cohort)} companies in cohort",
+            annotation_position="top right",
+        )
+    figure.add_hline(
+        y=0.045,
+        line_width=1.5,
+        line_dash="dash",
+        line_color=NDX_ACTIVE_COLOR,
+        annotation_text="4.5% company threshold",
+        annotation_position="top right",
+    )
+    cumulative_max = max(
+        float(cohort["cohort_cumulative"].max()) if not cohort.empty else 0.0,
+        0.50,
+    )
+    figure.update_layout(
+        template="plotly_dark" if IS_DARK_MODE else "plotly_white",
+        height=500,
+        margin={"l": 8, "r": 82, "t": 35, "b": 42},
+        hovermode="x",
+        legend={
+            "orientation": "h",
+            "yanchor": "bottom",
+            "y": 1.04,
+            "xanchor": "left",
+            "x": 0,
+            "font": {"color": THEME["chart_font"], "size": 10},
+        },
+        paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor="rgba(0,0,0,0)",
+        font={"color": THEME["chart_font"], "size": 11},
+        xaxis={
+            "title": "Company rank by Modified Market Cap",
+            "showgrid": False,
+            "range": [0.5, max(len(companies), 100) + 0.5],
+        },
+        yaxis={
+            "title": "Individual company weight",
+            "tickformat": ".1%",
+            "range": [0, float(companies["stage_one_weight"].max()) * 1.16],
+            "gridcolor": THEME["chart_grid"],
+            "zeroline": False,
+        },
+        yaxis2={
+            "title": "Cumulative qualifying cohort",
+            "tickformat": ".0%",
+            "overlaying": "y",
+            "side": "right",
+            "range": [0, cumulative_max * 1.12],
+            "showgrid": False,
+            "zeroline": False,
+        },
+    )
+    return figure
+
+
+def _annual_cumulative_weights_figure(
+    analysis: AnnualRebalanceAnalysis,
+) -> go.Figure:
+    companies = analysis.companies.sort_values(
+        "initial_weight",
+        ascending=False,
+    ).copy()
+    companies["rank"] = np.arange(1, len(companies) + 1)
+    companies["initial_cumulative"] = companies["initial_weight"].cumsum()
+    companies["final_cumulative"] = companies["final_weight"].cumsum()
+    figure = go.Figure()
+    figure.add_trace(
+        go.Scatter(
+            x=companies["rank"],
+            y=companies["initial_cumulative"],
+            mode="lines",
+            name="Initial Modified Market Cap",
+            line={"color": NDX_ACTIVE_COLOR, "width": 3},
+            customdata=companies[
+                ["company_name", "tickers", "initial_weight"]
+            ].to_numpy(),
+            hovertemplate=(
+                "Rank %{x}<br>"
+                "<b>%{customdata[0]}</b> (%{customdata[1]})<br>"
+                "Initial company weight: %{customdata[2]:.2%}<br>"
+                "Cumulative weight: %{y:.2%}<extra></extra>"
+            ),
+        )
+    )
+    figure.add_trace(
+        go.Scatter(
+            x=companies["rank"],
+            y=companies["final_cumulative"],
+            mode="lines",
+            name="After annual capping",
+            line={"color": "#268463", "width": 2},
+            customdata=companies[
+                ["company_name", "tickers", "final_weight"]
+            ].to_numpy(),
+            hovertemplate=(
+                "Rank %{x}<br>"
+                "<b>%{customdata[0]}</b> (%{customdata[1]})<br>"
+                "Final company weight: %{customdata[2]:.2%}<br>"
+                "Cumulative weight: %{y:.2%}<extra></extra>"
+            ),
+        )
+    )
+    for rank, label in [(75, "Top 75"), (100, "100 selected")]:
+        if rank <= len(companies):
+            figure.add_vline(
+                x=rank,
+                line_width=1,
+                line_dash="dot",
+                line_color=THEME["chart_zero"],
+                annotation_text=label,
+                annotation_position="top left",
+            )
+    figure.update_layout(
+        template="plotly_dark" if IS_DARK_MODE else "plotly_white",
+        height=430,
+        margin={"l": 8, "r": 20, "t": 35, "b": 40},
+        hovermode="x unified",
+        legend={
+            "orientation": "h",
+            "yanchor": "bottom",
+            "y": 1.03,
+            "xanchor": "left",
+            "x": 0,
+            "font": {"color": THEME["chart_font"], "size": 10},
+        },
+        paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor="rgba(0,0,0,0)",
+        font={"color": THEME["chart_font"], "size": 11},
+        xaxis={
+            "title": "Company rank by Modified Market Cap",
+            "showgrid": False,
+            "range": [1, max(100, len(companies))],
+        },
+        yaxis={
+            "title": "Cumulative weight",
+            "tickformat": ".0%",
+            "range": [0, 1.02],
+            "gridcolor": THEME["chart_grid"],
+            "zeroline": False,
+        },
+    )
+    return figure
+
+
+def _annual_float_multiple_figure(
+    analysis: AnnualRebalanceAnalysis,
+) -> go.Figure:
+    frame = analysis.securities.sort_values(
+        "initial_weight",
+        ascending=False,
+    ).copy()
+    frame["rank"] = np.arange(1, len(frame) + 1)
+    frame["modified_cap_ratio"] = pd.to_numeric(
+        frame["modified_cap_ratio"],
+        errors="coerce",
+    )
+    sizes = 7 + 28 * (
+        frame["initial_weight"] / frame["initial_weight"].max()
+    )
+    colors = np.where(
+        frame["modified_cap_ratio"].ge(3.0 - 1e-8),
+        NDX_ACTIVE_COLOR,
+        SPX_ACTIVE_COLOR,
+    )
+    figure = go.Figure(
+        go.Scatter(
+            x=frame["rank"],
+            y=frame["modified_cap_ratio"],
+            mode="markers",
+            marker={
+                "color": colors,
+                "size": sizes,
+                "opacity": 0.78,
+                "line": {"color": THEME["marker_outline"], "width": 0.8},
+            },
+            customdata=frame[
+                [
+                    "ticker",
+                    "company_name",
+                    "initial_weight",
+                    "rebalance_input_status",
+                ]
+            ].to_numpy(),
+            hovertemplate=(
+                "Rank %{x}<br>"
+                "<b>%{customdata[0]}</b> - %{customdata[1]}<br>"
+                "TSO / free-float multiple used: %{y:.2f}x<br>"
+                "Initial Modified Market Cap weight: "
+                "%{customdata[2]:.2%}<br>"
+                "Input: %{customdata[3]}<extra></extra>"
+            ),
+        )
+    )
+    figure.add_hline(
+        y=3.0,
+        line_width=1,
+        line_dash="dash",
+        line_color=NDX_ACTIVE_COLOR,
+        annotation_text="3x free-float ceiling",
+        annotation_position="top right",
+    )
+    figure.update_layout(
+        template="plotly_dark" if IS_DARK_MODE else "plotly_white",
+        height=430,
+        margin={"l": 8, "r": 20, "t": 35, "b": 40},
+        showlegend=False,
+        paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor="rgba(0,0,0,0)",
+        font={"color": THEME["chart_font"], "size": 11},
+        xaxis={
+            "title": "Security rank by initial weight",
+            "showgrid": False,
+        },
+        yaxis={
+            "title": "Modified-cap multiple",
+            "ticksuffix": "x",
+            "range": [0.85, 3.2],
+            "gridcolor": THEME["chart_grid"],
+            "zeroline": False,
+        },
+    )
+    return figure
+
+
+def _annual_cumulative_transfer_figure(
+    analysis: AnnualRebalanceAnalysis,
+) -> go.Figure:
+    frame = analysis.securities.sort_values(
+        "initial_weight",
+        ascending=False,
+    ).copy()
+    frame["rank"] = np.arange(1, len(frame) + 1)
+    frame["cumulative_transfer"] = frame["capping_change"].cumsum()
+    figure = go.Figure(
+        go.Scatter(
+            x=frame["rank"],
+            y=frame["cumulative_transfer"],
+            mode="lines",
+            line={"color": NDX_ACTIVE_COLOR, "width": 3},
+            fill="tozeroy",
+            fillcolor="rgba(223,107,79,0.16)",
+            customdata=frame[
+                ["ticker", "initial_weight", "final_weight", "capping_change"]
+            ].to_numpy(),
+            hovertemplate=(
+                "Initial rank %{x}<br>"
+                "<b>%{customdata[0]}</b><br>"
+                "Initial weight: %{customdata[1]:.2%}<br>"
+                "Final weight: %{customdata[2]:.2%}<br>"
+                "Security change: %{customdata[3]:+.2%}<br>"
+                "Cumulative transfer: %{y:+.2%}<extra></extra>"
+            ),
+        )
+    )
+    minimum_row = frame.loc[frame["cumulative_transfer"].idxmin()]
+    figure.add_annotation(
+        x=float(minimum_row["rank"]),
+        y=float(minimum_row["cumulative_transfer"]),
+        text=(
+            f"{abs(float(minimum_row['cumulative_transfer'])):.2%} shifted "
+            "out of higher ranks"
+        ),
+        showarrow=True,
+        arrowhead=2,
+        ax=45,
+        ay=45,
+        font={"color": NDX_ACTIVE_COLOR, "size": 10},
+    )
+    figure.add_hline(
+        y=0,
+        line_width=1,
+        line_color=THEME["chart_zero"],
+    )
+    figure.update_layout(
+        template="plotly_dark" if IS_DARK_MODE else "plotly_white",
+        height=420,
+        margin={"l": 8, "r": 20, "t": 25, "b": 40},
+        showlegend=False,
+        paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor="rgba(0,0,0,0)",
+        font={"color": THEME["chart_font"], "size": 11},
+        xaxis={
+            "title": "Initial Modified Market Cap rank",
+            "showgrid": False,
+        },
+        yaxis={
+            "title": "Cumulative final minus initial weight",
+            "tickformat": ".1%",
+            "gridcolor": THEME["chart_grid"],
+            "zeroline": False,
+        },
+    )
+    return figure
+
+
+def _annual_largest_transfers_figure(
+    analysis: AnnualRebalanceAnalysis,
+) -> go.Figure:
+    frame = analysis.securities.copy()
+    donors = frame.nsmallest(10, "capping_change")
+    beneficiaries = frame.nlargest(10, "capping_change")
+    display = (
+        pd.concat([donors, beneficiaries], ignore_index=True)
+        .drop_duplicates("ticker")
+        .sort_values("capping_change")
+    )
+    colors = display["capping_change"].map(
+        lambda value: "#268463" if value >= 0 else NDX_ACTIVE_COLOR
+    )
+    figure = go.Figure(
+        go.Bar(
+            x=display["capping_change"],
+            y=display["ticker"],
+            orientation="h",
+            marker={"color": colors, "line": {"width": 0}},
+            text=display["capping_change"].map(
+                lambda value: f"{value:+.2%}"
+            ),
+            textposition="outside",
+            textfont={"color": colors, "size": 10},
+            cliponaxis=False,
+            customdata=display[
+                ["initial_weight", "company_stage_weight", "final_weight"]
+            ].to_numpy(),
+            hovertemplate=(
+                "<b>%{y}</b><br>"
+                "Capping change: %{x:+.2%}<br>"
+                "Initial weight: %{customdata[0]:.2%}<br>"
+                "After company stage: %{customdata[1]:.2%}<br>"
+                "Final weight: %{customdata[2]:.2%}"
+                "<extra></extra>"
+            ),
+        )
+    )
+    figure.add_vline(
+        x=0,
+        line_width=1,
+        line_color=THEME["chart_zero"],
+    )
+    figure.update_layout(
+        template="plotly_dark" if IS_DARK_MODE else "plotly_white",
+        height=520,
+        margin={"l": 8, "r": 42, "t": 15, "b": 35},
+        showlegend=False,
+        bargap=0.25,
+        barcornerradius=5,
+        paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor="rgba(0,0,0,0)",
+        font={"color": THEME["chart_font"], "size": 11},
+        xaxis={
+            "title": None,
+            "tickformat": ".1%",
+            "gridcolor": THEME["chart_grid"],
+            "zeroline": False,
+            "range": _outside_label_axis_range(
+                display["capping_change"],
+                padding_ratio=0.32,
+            ),
+        },
+        yaxis={"title": None, "showgrid": False},
+    )
+    return figure
+
+
+def _render_annual_reconstitution_panel(
+    snapshot: dict[str, object],
+    components: pd.DataFrame,
+) -> None:
+    if snapshot.get("rebalance_ndx_wdi") is None:
+        st.info(
+            "No annual-reconstitution simulation is stored for this snapshot. "
+            "Use Refresh to calculate one."
+        )
+        return
+    try:
+        analysis = analyze_annual_rebalance(components)
+    except ValueError as exc:
+        st.warning(f"Annual-reconstitution analysis is unavailable: {exc}")
+        return
+
+    _render_annual_reconstitution_summary(snapshot, analysis)
+    st.markdown(
+        (
+            '<div class="ndx-source-row"><span class="ndx-status-dot"></span>'
+            f"{html.escape(str(snapshot.get('rebalance_method') or 'annual simulation'))}"
+            " &nbsp;|&nbsp; "
+            f"{html.escape(str(snapshot.get('rebalance_data_source') or 'public data'))}"
+            " &nbsp;|&nbsp; "
+            f"coverage {_percent(snapshot.get('rebalance_coverage_ratio'))}"
+            "</div>"
+        ),
+        unsafe_allow_html=True,
+    )
+    if (
+        analysis.persisted_weight_error is not None
+        and analysis.persisted_weight_error > 1e-8
+    ):
+        st.warning(
+            "The reconstructed stages differ from the persisted final weights "
+            f"by {analysis.persisted_weight_error:.3g}."
+        )
+
+    _render_annual_thresholds(analysis)
+
+    cohort_rule = analysis.thresholds.loc[
+        analysis.thresholds["rule_id"].eq("company_cohort")
+    ].iloc[0]
+    qualifying_companies = int(
+        analysis.companies["stage_one_weight"].gt(0.045 + 1e-12).sum()
+    )
+    st.subheader("Inside the 4.5% company cohort")
+    st.caption(
+        f"The 4.5% level selects {qualifying_companies} companies; it is not "
+        "the aggregate trigger. Their weights entering the test add up to "
+        f"{float(cohort_rule['actual']):.2%}. At 48%, Nasdaq reduces the "
+        "cohort to a 40% aggregate weight while preserving company rank."
+    )
+    st.plotly_chart(
+        _annual_company_cohort_figure(analysis),
+        width="stretch",
+        config={"displayModeBar": False},
+    )
+
+    st.subheader("Modified Market Cap inputs and concentration")
+    st.caption(
+        "The selected company distribution is shown before and after capping. "
+        "Candidate companies outside the selected universe are not persisted, "
+        "so no synthetic rank 101-125 distance is inferred."
+    )
+    input_columns = st.columns(2, gap="large")
+    with input_columns[0]:
+        st.markdown("**Cumulative selected-company weights**")
+        st.plotly_chart(
+            _annual_cumulative_weights_figure(analysis),
+            width="stretch",
+            config={"displayModeBar": False},
+        )
+    with input_columns[1]:
+        st.markdown("**Float adjustment used in Modified Market Cap**")
+        st.plotly_chart(
+            _annual_float_multiple_figure(analysis),
+            width="stretch",
+            config={"displayModeBar": False},
+        )
+
+    st.subheader("Weight transferred by the annual rules")
+    metrics = st.columns(5, gap="small")
+    metrics[0].metric(
+        "Company capping",
+        f"{analysis.company_redistribution:.2%}",
+    )
+    metrics[1].metric(
+        "Security capping",
+        f"{analysis.security_redistribution:.2%}",
+    )
+    metrics[2].metric(
+        "Total capping transfer",
+        f"{analysis.total_capping_redistribution:.2%}",
+    )
+    metrics[3].metric(
+        "Rank order preserved",
+        (
+            f"{min(analysis.company_rank_preservation_ratio, analysis.security_rank_preservation_ratio):.2%}"
+        ),
+        delta=(
+            f"company {analysis.company_rank_preservation_ratio:.2%} | "
+            f"security {analysis.security_rank_preservation_ratio:.2%}"
+        ),
+        delta_color="off",
+    )
+    metrics[4].metric(
+        "Recipients / donors",
+        f"{analysis.beneficiary_count} / {analysis.donor_count}",
+    )
+    transfer_columns = st.columns([1.08, 0.92], gap="large")
+    with transfer_columns[0]:
+        st.markdown("**Cumulative transfer by initial rank**")
+        st.plotly_chart(
+            _annual_cumulative_transfer_figure(analysis),
+            width="stretch",
+            config={"displayModeBar": False},
+        )
+    with transfer_columns[1]:
+        st.markdown("**Largest capping donors and recipients**")
+        st.plotly_chart(
+            _annual_largest_transfers_figure(analysis),
+            width="stretch",
+            config={"displayModeBar": False},
+        )
+
+    change_columns = st.columns([1.12, 0.88], gap="large")
+    with change_columns[0]:
+        _render_rebalance_changes_chart(components)
+    with change_columns[1]:
+        _render_rebalance_membership_chart(components)
+
+    with st.expander(
+        f"Annual weighting audit ({len(analysis.securities)} securities)"
+    ):
+        audit = analysis.securities[
+            [
+                "ticker",
+                "company_name",
+                "initial_rank",
+                "initial_weight",
+                "company_stage_weight",
+                "final_weight",
+                "capping_change",
+                "actual_weight",
+                "current_change",
+                "modified_cap_ratio",
+                "rebalance_input_status",
+            ]
+        ].sort_values("initial_rank")
+        st.dataframe(
+            audit,
+            hide_index=True,
+            width="stretch",
+            height=560,
+        )
+
+
 def _render_rebalance_changes_chart(components: pd.DataFrame) -> None:
     if "rebalance_weight_change" not in components:
         return
@@ -2048,20 +2959,30 @@ with title_columns[1]:
 
 panel_label = st.segmented_control(
     "Analysis",
-    ["NDX Distortion Index", "NDX vs S&P 500"],
+    [
+        "NDX Distortion Index",
+        "NDX vs S&P 500",
+        "Annual Reconstitution",
+    ],
     default="NDX Distortion Index",
     required=True,
     key="analysis_panel_selector",
     width="stretch",
 )
-st.caption(
-    (
+panel_captions = {
+    "NDX Distortion Index": (
         "Live ETF weights compared with a pure-capitalization reference."
-        if panel_label == "NDX Distortion Index"
-        else "Security-level Active Share between matching Nasdaq-100 and "
+    ),
+    "NDX vs S&P 500": (
+        "Security-level Active Share between matching Nasdaq-100 and "
         "S&P 500 iShares ETFs."
-    )
-)
+    ),
+    "Annual Reconstitution": (
+        "Visual audit of Modified Market Cap weighting, annual thresholds, "
+        "capping transfers, and simulated membership changes."
+    ),
+}
+st.caption(panel_captions[panel_label])
 
 control_widths = (
     [1.05, 1.05, 0.48, 0.62]
@@ -2104,21 +3025,26 @@ else:
     help_column = control_columns[2]
 
 with refresh_column:
+    refresh_help = (
+        f"Refresh live data for {universe_label}, including the matching "
+        "S&P 500 ETF comparison."
+        if panel_label == "NDX vs S&P 500"
+        else f"Refresh live data and the annual simulation for {universe_label}."
+    )
     recompute_clicked = st.button(
         "Refresh",
         icon=":material/refresh:",
         type="primary",
         width="stretch",
-        help=(
-            f"Refresh live data for {universe_label}, including the matching "
-            "S&P 500 ETF comparison."
-        ),
+        help=refresh_help,
     )
 with help_column:
     if panel_label == "NDX Distortion Index":
         _render_method_help(weighting_basis)
-    else:
+    elif panel_label == "NDX vs S&P 500":
         _render_active_share_help()
+    else:
+        _render_annual_reconstitution_help()
 
 if recompute_clicked:
     with st.spinner(f"Refreshing {universe_label}..."):
@@ -2146,7 +3072,14 @@ if notice := st.session_state.pop("_refresh_notice", None):
     st.toast(notice, icon=":material/check_circle:")
 
 components = pd.DataFrame(database.get_components(int(snapshot["snapshot_id"])))
-if panel_label == "NDX vs S&P 500":
+if panel_label == "Annual Reconstitution":
+    _render_annual_reconstitution_panel(snapshot, components)
+    st.caption(
+        "This is an auditable public-data simulation, not an official Nasdaq "
+        "review result. Nasdaq discretion and non-public review flags remain "
+        "outside the model."
+    )
+elif panel_label == "NDX vs S&P 500":
     _render_active_share_panel(database, snapshot)
     st.caption(
         "Active Share uses the complete normalized equity holdings union. "

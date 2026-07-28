@@ -18,6 +18,9 @@ ACWI market values are used instead of the displayed `Weight (%)` field because
 the market values retain precision for small positions. ADR/ADS securities and
 names absent from ACWI use a yfinance free-float fallback calibrated into the
 same ACWI fund-value units with the median ratio observed across matched names.
+The Nasdaq-listed `ASML` ADR is a maintained exception: its float is fixed at
+`88,000,000` ADRs because yfinance's consolidated value is not valid for that
+listing.
 
 ```text
 fallback_scale = median(ACWI_market_value / yfinance_float_market_cap)
@@ -59,7 +62,8 @@ reallocated to move from one distribution to the other.
   defaults are `ARM`, `ASML`, and `PDD`; `NDX_ADR_TICKERS` can extend the list.
 - Prices, `floatShares`, `sharesOutstanding`, and `marketCap` come from
   `yfinance`. They support total capitalization, fallback weights, and fallback
-  consistency checks.
+  consistency checks. The `ASML` ADR float overrides `floatShares` with
+  `88,000,000` and is persisted as `hardcoded_float_override`.
 - The internal yfinance SQLite cache is stored in `data/yfinance_cache` so the
   application remains usable when the Windows user cache is not writable.
 - An ACWI match does not require a yfinance price or float count. A missing or
@@ -161,7 +165,8 @@ The daily pipeline:
    The upper-quantile calibration estimates the common fund-value scale from
    ACWI names whose free float is close to 100%. Direct ACWI matches never use
    yfinance `floatShares`. For ADR/ADS securities or absent ACWI positions,
-   yfinance free float remains a documented fallback.
+   yfinance free float remains a documented fallback, except for the maintained
+   `ASML` ADR override of `88,000,000` floating receipts.
 5. Aggregates securities by company and iterates the annual company constraints:
    a company above 24% is reduced to at most 20%; if companies above 4.5%
    aggregate to at least 48%, that cohort is reduced to 40%. Initial rank is
@@ -187,6 +192,31 @@ public-data simulation rather than an official Nasdaq review. Nasdaq retains
 discretion and does not publish every review input. The snapshot records
 `rebalance_status`, source, coverage, additions, removals, fallbacks, and notes
 so this limitation remains visible through SQLite and the API.
+
+### Annual reconstitution dashboard
+
+The dedicated **Annual Reconstitution** panel reconstructs every weighting
+stage from the persisted live snapshot and makes the annual rules auditable:
+
+- observed company and security concentrations, their distance to each trigger,
+  and the corresponding Nasdaq target;
+- a ranked company-level view of the 4.5% cohort, including its cumulative
+  weight against the 48% trigger and 40% adjustment target;
+- cumulative selected-company Modified Market Capitalization before and after
+  company capping;
+- the Modified Market Capitalization multiple relative to the ACWI free-float
+  input, including the `3x` ceiling;
+- company-stage, security-stage, and total redistributed weight;
+- cumulative transfers by initial rank, the largest donors and recipients, and
+  rank preservation measured separately at each official capping stage;
+- current versus simulated annual weights, plus simulated index entries and
+  exits.
+
+An audit expander exposes the reconstructed stage values and residuals. The
+snapshot does not persist unselected candidates ranked 101-125, so the panel
+does not infer or display a fictitious distance to those selection cutoffs. It
+shows the selected 100-company distribution and the simulated membership
+changes instead.
 
 ## Capitalization references
 
@@ -299,6 +329,8 @@ used.
 qqq_holdings_provider.py  # Nasdaq-100 and S&P 500 iShares provider chains
 acwi_weights_provider.py  # ACWI matching, ADR labels, calibrated fallbacks
 active_share.py           # NDX/SPX union, normalization, and Active Share
+nasdaq100_rebalance.py    # annual/quarterly selection and weighting engine
+rebalance_analytics.py    # annual thresholds, stages, transfers, and rank audit
 edgar_quarterly_history.py # N-PORT archive, CUSIP history, quarterly scores
 market_data_provider.py   # live market data through yfinance
 distortion_engine.py      # pure calculations, coverage, and statuses

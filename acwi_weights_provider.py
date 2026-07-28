@@ -13,6 +13,8 @@ import numpy as np
 import pandas as pd
 import requests
 
+from market_data_provider import FLOAT_SHARES_OVERRIDE_STATUS
+
 
 DEFAULT_ACWI_URL = (
     "https://www.ishares.com/us/products/239600/"
@@ -280,6 +282,13 @@ def add_yfinance_fallbacks(
         data["shares_outstanding"].notna() & (data["shares_outstanding"] > 0)
     )
     market_cap_valid = data["market_cap"].notna() & (data["market_cap"] > 0)
+    float_share_status = data.get(
+        "float_shares_status",
+        pd.Series(None, index=data.index),
+    ).astype("string")
+    hardcoded_override = float_share_status.eq(
+        FLOAT_SHARES_OVERRIDE_STATUS
+    ).fillna(False)
     float_cap = data["price"] * data["float_shares"]
     inconsistent = (
         (
@@ -320,6 +329,13 @@ def add_yfinance_fallbacks(
         )
         data.loc[valid_fallback, "reference_source"] = "yfinance_fallback"
         data.loc[valid_fallback, "reference_status"] = "valid_yfinance_fallback"
+        valid_override = valid_fallback & hardcoded_override
+        data.loc[valid_override, "reference_source"] = (
+            "hardcoded_float_override"
+        )
+        data.loc[valid_override, "reference_status"] = (
+            "valid_hardcoded_float_override"
+        )
         data.loc[fallback & inconsistent, "reference_status"] = (
             "invalid_yfinance_fallback"
         )

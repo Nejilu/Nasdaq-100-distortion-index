@@ -111,3 +111,58 @@ def test_yfinance_fallback_is_calibrated_to_acwi_market_value_units():
 
     assert math.isclose(result.loc["ADR", "reference_weight_raw"], 50.0)
     assert result.loc["ADR", "reference_status"] == "valid_yfinance_fallback"
+
+
+def test_asml_override_is_not_reported_as_yfinance_fallback():
+    references = pd.DataFrame(
+        {
+            "ticker": ["A", "B", "ASML"],
+            "reference_weight_raw": [100.0, 200.0, None],
+            "reference_source": [
+                "ishares_acwi",
+                "ishares_acwi",
+                "yfinance_fallback",
+            ],
+            "security_type": [
+                "Ordinary share",
+                "Ordinary share",
+                "ADR/ADS",
+            ],
+            "acwi_weight": [0.01, 0.02, None],
+            "acwi_market_value": [100.0, 200.0, None],
+            "acwi_listing": ["US / NASDAQ", "US / NASDAQ", None],
+            "reference_status": [
+                "valid_acwi",
+                "valid_acwi",
+                "pending_yfinance_fallback",
+            ],
+        }
+    )
+    market_data = pd.DataFrame(
+        {
+            "ticker": ["A", "B", "ASML"],
+            "price": [10.0, 10.0, 10.0],
+            "float_shares": [10.0, 20.0, 88_000_000.0],
+            "shares_outstanding": [12.0, 22.0, 384_100_000.0],
+            "market_cap": [120.0, 220.0, 3_841_000_000.0],
+            "float_shares_status": [
+                "reported",
+                "reported",
+                "hardcoded_float_override",
+            ],
+        }
+    )
+
+    result = add_yfinance_fallbacks(
+        references, market_data, min_calibration_rows=2
+    ).set_index("ticker")
+
+    assert result.loc["ASML", "reference_weight_raw"] == 880_000_000.0
+    assert (
+        result.loc["ASML", "reference_source"]
+        == "hardcoded_float_override"
+    )
+    assert (
+        result.loc["ASML", "reference_status"]
+        == "valid_hardcoded_float_override"
+    )

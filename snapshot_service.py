@@ -18,7 +18,10 @@ from acwi_weights_provider import (
 )
 from database import SnapshotDatabase
 from distortion_engine import DistortionResult, calculate_distortion
-from market_data_provider import YFinanceMarketDataProvider
+from market_data_provider import (
+    FLOAT_SHARES_OVERRIDE_STATUS,
+    YFinanceMarketDataProvider,
+)
 from nasdaq100_rebalance import (
     NasdaqPublicUniverseProvider,
     RebalanceResult,
@@ -174,11 +177,24 @@ def recompute_snapshot(
             market_data["reference_weight_raw"] = (
                 market_data["price"] * market_data["float_shares"]
             )
+            market_data["reference_source"] = "yfinance_fallback"
             market_data["reference_status"] = np.where(
                 market_data["reference_weight_raw"].gt(0),
                 "valid_yfinance_fallback",
                 "missing_float_yfinance_fallback",
             )
+            hardcoded_override = (
+                market_data["float_shares_status"]
+                .astype("string")
+                .eq(FLOAT_SHARES_OVERRIDE_STATUS)
+                & market_data["reference_weight_raw"].gt(0)
+            )
+            market_data.loc[
+                hardcoded_override, "reference_source"
+            ] = "hardcoded_float_override"
+            market_data.loc[
+                hardcoded_override, "reference_status"
+            ] = "valid_hardcoded_float_override"
             market_source = f"{market_provider.source_name}_global_fallback"
         else:
             market_data = market_data.merge(references, on="ticker", how="left")
@@ -189,6 +205,8 @@ def recompute_snapshot(
             market_source = acwi_provider.source_name
             if "yfinance_fallback" in reference_sources:
                 market_source += "+yfinance_fallback"
+            if "hardcoded_float_override" in reference_sources:
+                market_source += "+hardcoded_float_override"
         rebalance_reference = market_data.copy()
         rebalance_reference["modified_float_mass_raw"] = rebalance_reference[
             "reference_weight_raw"
