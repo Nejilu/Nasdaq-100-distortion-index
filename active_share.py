@@ -19,6 +19,14 @@ class ActiveShareResult:
     status: str = "complete"
 
 
+@dataclass(frozen=True)
+class ActiveShareSleeves:
+    components: pd.DataFrame
+    ndx_active_mass: float
+    spx_active_mass: float
+    overlap_mass: float
+
+
 def calculate_active_share(
     ndx_components: pd.DataFrame,
     spx_holdings: pd.DataFrame,
@@ -115,6 +123,79 @@ def calculate_active_share(
         spx_reference_fund=spx_reference_fund,
         spx_holdings_source=spx_holdings_source,
         spx_holdings_as_of=spx_holdings_as_of,
+    )
+
+
+def calculate_active_share_sleeves(
+    components: pd.DataFrame,
+    *,
+    ndx_weight_column: str = "ndx_weight",
+) -> ActiveShareSleeves:
+    """Build NDX-active, SPX-active, and overlap portfolios normalized to 100%."""
+    required = {"ticker", ndx_weight_column, "spx_weight"}
+    missing = required.difference(components.columns)
+    if missing:
+        raise ValueError(f"Active Share components are missing: {sorted(missing)}")
+
+    frame = pd.DataFrame(
+        {
+            "ticker": components["ticker"].map(_canonical_ticker),
+            "company_name": components.get(
+                "company_name",
+                components["ticker"],
+            ),
+            "ndx_weight": pd.to_numeric(
+                components[ndx_weight_column],
+                errors="coerce",
+            ),
+            "spx_weight": pd.to_numeric(
+                components["spx_weight"],
+                errors="coerce",
+            ),
+        }
+    ).dropna(subset=["ndx_weight", "spx_weight"])
+    if (frame[["ndx_weight", "spx_weight"]] < 0).any().any():
+        raise ValueError("Active Share sleeve weights cannot be negative.")
+
+    frame = (
+        frame.groupby("ticker", as_index=False, sort=False)
+        .agg(
+            company_name=("company_name", "first"),
+            ndx_weight=("ndx_weight", "sum"),
+            spx_weight=("spx_weight", "sum"),
+        )
+    )
+    ndx_total = float(frame["ndx_weight"].sum())
+    spx_total = float(frame["spx_weight"].sum())
+    if ndx_total <= 0 or spx_total <= 0:
+        raise ValueError("Both portfolios need positive holdings weights.")
+    frame["ndx_weight"] /= ndx_total
+    frame["spx_weight"] /= spx_total
+
+    frame["ndx_active_raw"] = (
+        frame["ndx_weight"] - frame["spx_weight"]
+    ).clip(lower=0)
+    frame["spx_active_raw"] = (
+        frame["spx_weight"] - frame["ndx_weight"]
+    ).clip(lower=0)
+    frame["overlap_raw"] = frame[["ndx_weight", "spx_weight"]].min(axis=1)
+
+    masses = {
+        "ndx_active": float(frame["ndx_active_raw"].sum()),
+        "spx_active": float(frame["spx_active_raw"].sum()),
+        "overlap": float(frame["overlap_raw"].sum()),
+    }
+    for sleeve in ["ndx_active", "spx_active", "overlap"]:
+        mass = masses[sleeve]
+        frame[f"{sleeve}_weight"] = (
+            frame[f"{sleeve}_raw"] / mass if mass > 0 else 0.0
+        )
+
+    return ActiveShareSleeves(
+        components=frame,
+        ndx_active_mass=masses["ndx_active"],
+        spx_active_mass=masses["spx_active"],
+        overlap_mass=masses["overlap"],
     )
 
 

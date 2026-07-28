@@ -12,6 +12,7 @@ import plotly.graph_objects as go
 import streamlit as st
 from dotenv import load_dotenv
 
+from active_share import calculate_active_share_sleeves
 from database import SnapshotDatabase
 from snapshot_service import recompute_snapshot
 
@@ -1245,6 +1246,157 @@ def _render_active_share_top_x(
     )
 
 
+def _active_share_sleeve_figure(
+    components: pd.DataFrame,
+    *,
+    weight_column: str,
+    color: str,
+    maximum_holdings: int = 12,
+) -> go.Figure:
+    sleeve = components.loc[
+        pd.to_numeric(components[weight_column], errors="coerce").gt(0)
+    ].copy()
+    sleeve[weight_column] = pd.to_numeric(
+        sleeve[weight_column],
+        errors="coerce",
+    )
+    sleeve = sleeve.sort_values(weight_column, ascending=False)
+    visible = sleeve.head(maximum_holdings).copy()
+    remaining = sleeve.iloc[maximum_holdings:]
+    if not remaining.empty:
+        visible = pd.concat(
+            [
+                visible,
+                pd.DataFrame(
+                    {
+                        "ticker": ["Other"],
+                        "company_name": [
+                            f"{len(remaining)} remaining holdings"
+                        ],
+                        weight_column: [float(remaining[weight_column].sum())],
+                    }
+                ),
+            ],
+            ignore_index=True,
+        )
+    visible = visible.sort_values(weight_column)
+    maximum_weight = float(visible[weight_column].max())
+    figure = go.Figure(
+        go.Bar(
+            x=visible[weight_column],
+            y=visible["ticker"],
+            orientation="h",
+            marker={"color": color, "line": {"width": 0}},
+            opacity=0.9,
+            text=visible[weight_column].map(lambda value: f"{value:.1%}"),
+            textposition="outside",
+            textfont={"color": color, "size": 10},
+            cliponaxis=False,
+            customdata=visible[["company_name"]].to_numpy(),
+            hovertemplate=(
+                "<b>%{y}</b><br>"
+                "%{customdata[0]}<br>"
+                "Synthetic ETF weight: %{x:.2%}"
+                "<extra></extra>"
+            ),
+        )
+    )
+    figure.update_layout(
+        template="plotly_dark" if IS_DARK_MODE else "plotly_white",
+        height=390,
+        margin={"l": 8, "r": 18, "t": 8, "b": 32},
+        showlegend=False,
+        bargap=0.27,
+        barcornerradius=5,
+        paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor="rgba(0,0,0,0)",
+        font={"color": THEME["chart_font"], "size": 11},
+        xaxis={
+            "title": None,
+            "tickformat": ".0%",
+            "gridcolor": THEME["chart_grid"],
+            "zeroline": False,
+            "range": [0, max(maximum_weight * 1.28, 0.05)],
+        },
+        yaxis={"title": None, "showgrid": False, "automargin": True},
+    )
+    return figure
+
+
+def _render_active_share_sleeves(
+    components: pd.DataFrame,
+    *,
+    rebalanced_view: bool,
+) -> None:
+    ndx_column = (
+        "rebalanced_ndx_weight" if rebalanced_view else "ndx_weight"
+    )
+    sleeves = calculate_active_share_sleeves(
+        components,
+        ndx_weight_column=ndx_column,
+    )
+    st.subheader("Synthetic 100% Active Share portfolios")
+    st.caption(
+        "Each sleeve is independently renormalized to 100%. The charts show "
+        "the twelve largest synthetic holdings plus an Other position, so "
+        "every displayed portfolio still totals exactly 100%."
+    )
+    specifications = [
+        (
+            "NDX active sleeve",
+            "Positive NDX weight differences versus the S&P 500.",
+            "ndx_active_weight",
+            sleeves.ndx_active_mass,
+            NDX_ACTIVE_COLOR,
+        ),
+        (
+            "S&P 500 active sleeve",
+            "Positive S&P 500 weight differences versus the NDX.",
+            "spx_active_weight",
+            sleeves.spx_active_mass,
+            SPX_ACTIVE_COLOR,
+        ),
+        (
+            "Shared overlap sleeve",
+            "The common weight held by both index exposures.",
+            "overlap_weight",
+            sleeves.overlap_mass,
+            ACTIVE_OVERLAP_COLOR,
+        ),
+    ]
+    for index, (
+        title,
+        description,
+        weight_column,
+        source_mass,
+        color,
+    ) in enumerate(specifications):
+        columns = st.columns(
+            [0.26, 0.74],
+            gap="large",
+            vertical_alignment="center",
+        )
+        with columns[0]:
+            st.markdown(f"**{title}**")
+            st.metric("Original portfolio mass", f"{source_mass:.2%}")
+            st.caption(f"{description} Synthetic holdings sum to 100%.")
+        with columns[1]:
+            st.plotly_chart(
+                _active_share_sleeve_figure(
+                    sleeves.components,
+                    weight_column=weight_column,
+                    color=color,
+                ),
+                width="stretch",
+                config={"displayModeBar": False},
+            )
+        if index < len(specifications) - 1:
+            st.markdown(
+                '<div class="ndx-section-rule"></div>',
+                unsafe_allow_html=True,
+            )
+
+
 def _render_active_share_panel(
     database: SnapshotDatabase,
     snapshot: dict[str, object],
@@ -1293,6 +1445,10 @@ def _render_active_share_panel(
         rebalanced_view=rebalanced_view,
     )
     _render_active_share_top_x(
+        components,
+        rebalanced_view=rebalanced_view,
+    )
+    _render_active_share_sleeves(
         components,
         rebalanced_view=rebalanced_view,
     )

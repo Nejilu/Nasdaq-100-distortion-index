@@ -106,9 +106,22 @@ The panel includes:
 - a Top-X slider that compares the aggregate weight of the largest NDX names in
   both portfolios;
 - an overlaid constituent breakdown for that selected Top-X set;
+- three synthetic portfolios built from the full holdings union: the positive
+  NDX differences, the positive S&P 500 differences, and their shared overlap,
+  each independently renormalized to 100%;
 - an annual-reconstitution toggle that replaces current NDX weights with the
   same public-data annual simulation used by the distortion panel, while the
   S&P 500 reference remains unchanged.
+
+```text
+NDX_active_holding = max(NDX_weight - SPX_weight, 0) / active_share
+SPX_active_holding = max(SPX_weight - NDX_weight, 0) / active_share
+overlap_holding = min(NDX_weight, SPX_weight) / (1 - active_share)
+```
+
+Each synthetic chart shows its twelve largest holdings and an `Other` position
+that contains every remaining holding, so the displayed composition still sums
+to exactly 100%.
 
 Official iShares holdings downloads are the primary S&P 500 sources. Optional
 local files can be configured with `NON_UCITS_SPX_HOLDINGS_CSV` and
