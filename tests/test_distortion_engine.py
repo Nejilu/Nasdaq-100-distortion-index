@@ -6,6 +6,8 @@ import pandas as pd
 
 from distortion_engine import calculate_distortion, normalize_actual_weights
 from market_data_provider import (
+    FLOAT_SHARES_OVERRIDE_STATUS,
+    FLOAT_SHARES_OVERRIDES,
     YFinanceMarketDataProvider,
     _allocate_shared_float_shares,
     _normalize_market_data,
@@ -100,11 +102,11 @@ def test_missing_price_and_float_statuses_are_counted_separately():
 
 def test_inconsistent_float_is_excluded_instead_of_distorting_the_index():
     holdings = pd.DataFrame(
-        {"ticker": ["ASML", "A", "B"], "actual_weight": [0.01, 0.49, 0.50]}
+        {"ticker": ["BAD", "A", "B"], "actual_weight": [0.01, 0.49, 0.50]}
     )
     market_data = pd.DataFrame(
         {
-            "ticker": ["ASML", "A", "B"],
+            "ticker": ["BAD", "A", "B"],
             "price": [1747.58, 10.0, 20.0],
             "float_shares": [21_331_633_667, 100.0, 50.0],
             "shares_outstanding": [384_100_000, 120.0, 60.0],
@@ -119,8 +121,8 @@ def test_inconsistent_float_is_excluded_instead_of_distorting_the_index():
     assert result.invalid_float_count == 1
     assert result.missing_float_count == 0
     assert math.isclose(result.coverage_ratio, 0.99)
-    assert components.loc["ASML", "data_status"] == "invalid_float_inconsistent"
-    assert pd.isna(components.loc["ASML", "float_weight"])
+    assert components.loc["BAD", "data_status"] == "invalid_float_inconsistent"
+    assert pd.isna(components.loc["BAD", "float_weight"])
     assert math.isclose(valid["float_weight"].sum(), 1.0)
 
 
@@ -282,3 +284,30 @@ def test_yfinance_worker_count_is_clamped_to_one(monkeypatch):
 
     assert result.loc[0, "ticker"] == "A"
     assert result.loc[0, "price"] == 10.0
+
+
+def test_asml_adr_float_override_replaces_yfinance_value(monkeypatch):
+    provider = YFinanceMarketDataProvider(max_workers=1)
+    monkeypatch.setattr(provider, "_configure_cache", lambda: None)
+    monkeypatch.setattr(
+        provider,
+        "_fetch_one",
+        lambda ticker: {
+            "ticker": ticker,
+            "price": 1_747.58,
+            "float_shares": 21_331_633_667,
+            "shares_outstanding": 384_100_000,
+            "market_cap": 671_245_467_648,
+            "float_shares_status": "reported",
+            "market_data_error": None,
+        },
+    )
+
+    result = provider.get_market_data(["ASML"]).set_index("ticker")
+
+    assert FLOAT_SHARES_OVERRIDES["ASML"] == 88_000_000.0
+    assert result.loc["ASML", "float_shares"] == 88_000_000.0
+    assert (
+        result.loc["ASML", "float_shares_status"]
+        == FLOAT_SHARES_OVERRIDE_STATUS
+    )

@@ -18,6 +18,9 @@ ACWI market values are used instead of the displayed `Weight (%)` field because
 the market values retain precision for small positions. ADR/ADS securities and
 names absent from ACWI use a yfinance free-float fallback calibrated into the
 same ACWI fund-value units with the median ratio observed across matched names.
+The Nasdaq-listed `ASML` ADR is a maintained exception: its float is fixed at
+`88,000,000` ADRs because yfinance's consolidated value is not valid for that
+listing.
 
 ```text
 fallback_scale = median(ACWI_market_value / yfinance_float_market_cap)
@@ -59,7 +62,8 @@ reallocated to move from one distribution to the other.
   defaults are `ARM`, `ASML`, and `PDD`; `NDX_ADR_TICKERS` can extend the list.
 - Prices, `floatShares`, `sharesOutstanding`, and `marketCap` come from
   `yfinance`. They support total capitalization, fallback weights, and fallback
-  consistency checks.
+  consistency checks. The `ASML` ADR float overrides `floatShares` with
+  `88,000,000` and is persisted as `hardcoded_float_override`.
 - The internal yfinance SQLite cache is stored in `data/yfinance_cache` so the
   application remains usable when the Windows user cache is not writable.
 - An ACWI match does not require a yfinance price or float count. A missing or
@@ -147,7 +151,8 @@ The daily pipeline:
    The upper-quantile calibration estimates the common fund-value scale from
    ACWI names whose free float is close to 100%. Direct ACWI matches never use
    yfinance `floatShares`. For ADR/ADS securities or absent ACWI positions,
-   yfinance free float remains a documented fallback.
+   yfinance free float remains a documented fallback, except for the maintained
+   `ASML` ADR override of `88,000,000` floating receipts.
 5. Aggregates securities by company and iterates the annual company constraints:
    a company above 24% is reduced to at most 20%; if companies above 4.5%
    aggregate to at least 48%, that cohort is reduced to 40%. Initial rank is

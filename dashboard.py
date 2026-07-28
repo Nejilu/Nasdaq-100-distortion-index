@@ -569,8 +569,10 @@ def _render_method_help(weighting_basis: str) -> None:
 
                 ACWI matches are selected for Nasdaq-100 constituents and normalized
                 to 100%. ADR/ADS securities and ACWI absences use a calibrated
-                yfinance fallback. Each valid fallback is converted into ACWI
-                fund-value units with the median conversion ratio from matched names.
+                fallback converted into ACWI fund-value units with the median ratio
+                from matched names. The Nasdaq-listed ASML ADR uses a maintained
+                override of 88 million floating ADRs because yfinance's consolidated
+                float is inconsistent with that listing.
 
                 Free-float adjustment is also used by major investable benchmarks such
                 as the [S&P 500](https://www.spglobal.com/spdji/en/methodology/article/sp-us-indices-methodology/)
@@ -662,7 +664,15 @@ def _render_score_strip(
         else "Refresh to calculate"
     )
     valid_fallbacks = int(
-        components["data_status"].astype("string").eq("valid_yfinance_fallback").sum()
+        components["data_status"]
+        .astype("string")
+        .isin(
+            [
+                "valid_yfinance_fallback",
+                "valid_hardcoded_float_override",
+            ]
+        )
+        .sum()
     )
     if weighting_basis == "float":
         fourth_label = "Fallbacks"

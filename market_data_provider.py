@@ -10,6 +10,14 @@ from typing import Protocol, Sequence
 import pandas as pd
 
 
+FLOAT_SHARES_OVERRIDES = {
+    # Nasdaq-listed ASML ADR float. Do not substitute the Dutch ordinary-share
+    # float or yfinance's inconsistent consolidated value.
+    "ASML": 88_000_000.0,
+}
+FLOAT_SHARES_OVERRIDE_STATUS = "hardcoded_float_override"
+
+
 class MarketDataProvider(Protocol):
     """Contract implemented by market data sources."""
 
@@ -76,7 +84,10 @@ class YFinanceMarketDataProvider:
                             "market_data_error": str(exc),
                         }
                     )
-        return _allocate_shared_float_shares(_normalize_market_data(pd.DataFrame(rows)))
+        normalized = _allocate_shared_float_shares(
+            _normalize_market_data(pd.DataFrame(rows))
+        )
+        return _apply_float_share_overrides(normalized)
 
 
 def _normalize_market_data(frame: pd.DataFrame) -> pd.DataFrame:
@@ -131,4 +142,16 @@ def _allocate_shared_float_shares(frame: pd.DataFrame) -> pd.DataFrame:
         allocated = float(reported_float) * outstanding / total_outstanding
         result.loc[group.index, "float_shares"] = allocated
         result.loc[group.index, "float_shares_status"] = "allocated_shared_float"
+    return result
+
+
+def _apply_float_share_overrides(frame: pd.DataFrame) -> pd.DataFrame:
+    """Apply maintained listing-specific overrides after provider cleanup."""
+    result = frame.copy()
+    for ticker, float_shares in FLOAT_SHARES_OVERRIDES.items():
+        matches = result["ticker"].eq(ticker)
+        result.loc[matches, "float_shares"] = float_shares
+        result.loc[matches, "float_shares_status"] = (
+            FLOAT_SHARES_OVERRIDE_STATUS
+        )
     return result

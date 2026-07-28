@@ -838,13 +838,17 @@ def simulate_rebalance(
 
     data["listed_total_cap"] = data["price"] * data["shares_outstanding"]
     conversion_scale, conversion_count = derive_acwi_total_cap_conversion(data)
+    reference_source = data.get(
+        "reference_source",
+        pd.Series(None, index=data.index),
+    ).astype("string")
     direct_acwi = (
-        data.get("reference_source", pd.Series(None, index=data.index))
-        .astype("string")
-        .eq("ishares_acwi")
-        .fillna(False)
+        reference_source.eq("ishares_acwi").fillna(False)
         & data["modified_float_mass_raw"].gt(0)
     )
+    hardcoded_float_reference = reference_source.eq(
+        "hardcoded_float_override"
+    ).fillna(False)
     fallback_reference = ~direct_acwi & data["modified_float_mass_raw"].gt(0)
     yfinance_float_ratio = data["shares_outstanding"] / data["float_shares"]
     yfinance_ratio_valid = (
@@ -901,6 +905,12 @@ def simulate_rebalance(
         fallback_reference & ~yfinance_ratio_valid,
         "rebalance_input_status",
     ] = "float_ratio_fallback_1x"
+    data.loc[
+        fallback_reference
+        & hardcoded_float_reference
+        & yfinance_ratio_valid,
+        "rebalance_input_status",
+    ] = "valid_hardcoded_float_override"
     data.loc[
         current_mass_fallback,
         "rebalance_input_status",
@@ -1011,6 +1021,19 @@ def simulate_rebalance(
             "Direct ACWI modified caps use an ACWI/total-cap conversion scale "
             f"of {conversion_scale:.8g}, calibrated on {conversion_count} "
             "matched securities; yfinance floatShares is not used for them."
+        )
+    hardcoded_float_count = int(
+        (
+            weighting_valid
+            & data["rebalance_input_status"].eq(
+                "valid_hardcoded_float_override"
+            )
+        ).sum()
+    )
+    if hardcoded_float_count:
+        notes.append(
+            f"{hardcoded_float_count} security used a maintained "
+            "listing-specific float-share override instead of yfinance."
         )
     if rebalance_type == "quarterly":
         notes.append(
