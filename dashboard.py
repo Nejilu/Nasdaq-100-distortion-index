@@ -1482,62 +1482,113 @@ def _render_annual_thresholds(
     thresholds = analysis.thresholds.copy()
     thresholds["status_label"] = np.where(
         thresholds["triggered"],
-        "Triggered",
-        "Not triggered",
+        "RULE ACTIVE",
+        "NOT TRIGGERED",
     )
     thresholds["distance_label"] = thresholds["distance_to_trigger"].map(
         lambda value: (
-            f"{value * 100:+.2f} pp buffer"
+            f"{value * 100:.2f} pp buffer"
             if value >= 0
-            else f"{abs(value) * 100:.2f} pp beyond trigger"
+            else f"{abs(value) * 100:.2f} pp over trigger"
         )
     )
     thresholds["color"] = thresholds["triggered"].map(
         {True: NDX_ACTIVE_COLOR, False: "#268463"}
     )
+    axis_maximum = max(
+        0.60,
+        float(
+            thresholds[["actual", "threshold", "target"]]
+            .to_numpy()
+            .max()
+        )
+        * 1.08,
+    )
     figure = go.Figure()
+
     for _, row in thresholds.iterrows():
         figure.add_trace(
             go.Scatter(
-                x=[0.0, row["distance_to_trigger"]],
+                x=[0.0, axis_maximum],
                 y=[row["label"], row["label"]],
                 mode="lines",
-                line={"color": row["color"], "width": 5},
-                opacity=0.42,
+                line={"color": THEME["chart_grid"], "width": 10},
                 hoverinfo="skip",
                 showlegend=False,
             )
         )
+        figure.add_trace(
+            go.Scatter(
+                x=[row["target"], row["threshold"]],
+                y=[row["label"], row["label"]],
+                mode="lines",
+                line={"color": "#d69a2d", "width": 10},
+                opacity=0.18,
+                hoverinfo="skip",
+                showlegend=False,
+            )
+        )
+
     figure.add_trace(
         go.Scatter(
-            x=thresholds["distance_to_trigger"],
+            x=thresholds["target"],
             y=thresholds["label"],
             mode="markers+text",
+            name="Adjustment target",
+            marker={
+                "color": "#268463",
+                "size": 11,
+                "symbol": "square",
+                "line": {"color": THEME["marker_outline"], "width": 1},
+            },
+            text=thresholds["target"].map(lambda value: f"{value:.1%}"),
+            textposition="bottom center",
+            textfont={"color": "#268463", "size": 10},
+            customdata=thresholds[["rule"]].to_numpy(),
+            hovertemplate=(
+                "<b>%{y}</b><br>"
+                "Adjustment target: %{x:.2%}<br>"
+                "%{customdata[0]}<extra></extra>"
+            ),
+        )
+    )
+    figure.add_trace(
+        go.Scatter(
+            x=thresholds["threshold"],
+            y=thresholds["label"],
+            mode="markers+text",
+            name="Official trigger",
+            marker={
+                "color": "#d69a2d",
+                "size": 13,
+                "symbol": "diamond",
+                "line": {"color": THEME["marker_outline"], "width": 1},
+            },
+            text=thresholds["threshold"].map(lambda value: f"{value:.1%}"),
+            textposition="top center",
+            textfont={"color": "#d69a2d", "size": 10},
+            customdata=thresholds[["rule"]].to_numpy(),
+            hovertemplate=(
+                "<b>%{y}</b><br>"
+                "Official trigger: %{x:.2%}<br>"
+                "%{customdata[0]}<extra></extra>"
+            ),
+        )
+    )
+    figure.add_trace(
+        go.Scatter(
+            x=thresholds["actual"],
+            y=thresholds["label"],
+            mode="markers",
+            name="Observed",
             marker={
                 "color": thresholds["color"],
-                "size": 18,
+                "size": 20,
                 "symbol": "circle",
                 "line": {"color": THEME["marker_outline"], "width": 1.5},
             },
-            text=thresholds["distance_to_trigger"].map(
-                lambda value: (
-                    f"+{value * 100:.2f} pp"
-                    if value >= 0
-                    else f"{value * 100:.2f} pp"
-                )
-            ),
-            textposition=[
-                "middle right" if value >= 0 else "middle left"
-                for value in thresholds["distance_to_trigger"]
-            ],
-            textfont={
-                "color": thresholds["color"].tolist(),
-                "size": 11,
-            },
-            cliponaxis=False,
             customdata=thresholds[
                 [
-                    "actual",
                     "threshold",
                     "target",
                     "status_label",
@@ -1547,84 +1598,51 @@ def _render_annual_thresholds(
             ].to_numpy(),
             hovertemplate=(
                 "<b>%{y}</b><br>"
-                "Observed input: %{customdata[0]:.2%}<br>"
-                "Trigger: %{customdata[1]:.2%}<br>"
-                "Adjustment target: %{customdata[2]:.2%}<br>"
-                "%{customdata[4]}<br>"
-                "%{customdata[5]}<extra></extra>"
+                "Observed input: %{x:.2%}<br>"
+                "Trigger: %{customdata[0]:.2%}<br>"
+                "Adjustment target: %{customdata[1]:.2%}<br>"
+                "%{customdata[2]} - %{customdata[3]}<br>"
+                "%{customdata[4]}<extra></extra>"
             ),
-            showlegend=False,
         )
     )
-    minimum = min(
-        float(thresholds["distance_to_trigger"].min()),
-        -0.025,
-    )
-    maximum = max(
-        float(thresholds["distance_to_trigger"].max()),
-        0.025,
-    )
-    padding = max((maximum - minimum) * 0.24, 0.035)
-    figure.add_vrect(
-        x0=minimum - padding,
-        x1=0,
-        fillcolor=NDX_ACTIVE_COLOR,
-        opacity=0.055,
-        line_width=0,
-        layer="below",
-    )
-    figure.add_vrect(
-        x0=0,
-        x1=maximum + padding,
-        fillcolor="#268463",
-        opacity=0.045,
-        line_width=0,
-        layer="below",
-    )
-    figure.add_vline(
-        x=0,
-        line_width=1.5,
-        line_color=THEME["chart_zero"],
-    )
-    figure.add_annotation(
-        x=0,
-        y=1.12,
-        xref="x",
-        yref="paper",
-        text="OFFICIAL TRIGGER",
-        showarrow=False,
-        font={"color": THEME["muted"], "size": 9},
-    )
-    figure.add_annotation(
-        x=minimum - padding * 0.55,
-        y=1.12,
-        xref="x",
-        yref="paper",
-        text="RULE ACTIVE",
-        showarrow=False,
-        font={"color": NDX_ACTIVE_COLOR, "size": 9},
-    )
-    figure.add_annotation(
-        x=maximum + padding * 0.55,
-        y=1.12,
-        xref="x",
-        yref="paper",
-        text="BUFFER REMAINING",
-        showarrow=False,
-        font={"color": "#268463", "size": 9},
-    )
+    for _, row in thresholds.iterrows():
+        status_color = row["color"]
+        figure.add_annotation(
+            x=1.015,
+            y=row["label"],
+            xref="paper",
+            yref="y",
+            text=(
+                f"<b>Observed {row['actual']:.2%}</b><br>"
+                f"<span style='color:{status_color}'>"
+                f"{row['status_label']} · {row['distance_label']}</span>"
+            ),
+            showarrow=False,
+            xanchor="left",
+            align="left",
+            font={"color": THEME["chart_font"], "size": 10},
+        )
+
     figure.update_layout(
         template="plotly_dark" if IS_DARK_MODE else "plotly_white",
-        height=330,
-        margin={"l": 8, "r": 78, "t": 38, "b": 38},
-        showlegend=False,
+        height=390,
+        margin={"l": 8, "r": 220, "t": 52, "b": 42},
+        legend={
+            "orientation": "h",
+            "yanchor": "bottom",
+            "y": 1.06,
+            "xanchor": "left",
+            "x": 0,
+            "font": {"color": THEME["chart_font"], "size": 10},
+        },
         paper_bgcolor="rgba(0,0,0,0)",
         plot_bgcolor="rgba(0,0,0,0)",
         font={"color": THEME["chart_font"], "size": 11},
         xaxis={
-            "title": "Distance to trigger (percentage points)",
-            "tickformat": "+.0%",
-            "range": [minimum - padding, maximum + padding],
+            "title": "Rule input as a share of index weight",
+            "tickformat": ".0%",
+            "range": [0, axis_maximum],
             "gridcolor": THEME["chart_grid"],
             "zeroline": False,
         },
@@ -1634,11 +1652,11 @@ def _render_annual_thresholds(
             "autorange": "reversed",
         },
     )
-    st.subheader("Distance to annual capping triggers")
+    st.subheader("Annual capping rule map")
     st.caption(
-        "Zero is the official trigger. A point to the left means the rule is "
-        "active; a point to the right shows the remaining buffer. Hover for "
-        "the observed input and adjustment target."
+        "Circle: observed concentration. Diamond: official trigger. Square: "
+        "weight target applied when the rule activates. The highlighted band "
+        "connects each target to its trigger."
     )
     st.plotly_chart(
         figure,
