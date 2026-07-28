@@ -1390,6 +1390,39 @@ def _render_active_share_sleeves(
                 width="stretch",
                 config={"displayModeBar": False},
             )
+        detailed = (
+            sleeves.components.loc[
+                sleeves.components[weight_column].gt(0),
+                ["ticker", "company_name", weight_column],
+            ]
+            .nlargest(50, weight_column)
+            .reset_index(drop=True)
+        )
+        detailed.insert(0, "Rank", np.arange(1, len(detailed) + 1))
+        detailed["Weight"] = detailed[weight_column].map(
+            lambda value: f"{value:.2%}"
+        )
+        detailed["Cumulative weight"] = detailed[weight_column].cumsum().map(
+            lambda value: f"{value:.2%}"
+        )
+        detailed = detailed.rename(
+            columns={
+                "ticker": "Ticker",
+                "company_name": "Company",
+            }
+        )[["Rank", "Ticker", "Company", "Weight", "Cumulative weight"]]
+        with st.expander(f"Top {len(detailed)} holdings - {title}"):
+            st.caption(
+                f"These holdings represent "
+                f"{sleeves.components.nlargest(50, weight_column)[weight_column].sum():.2%} "
+                "of the normalized synthetic portfolio."
+            )
+            st.dataframe(
+                detailed,
+                hide_index=True,
+                width="stretch",
+                height=520,
+            )
         if index < len(specifications) - 1:
             st.markdown(
                 '<div class="ndx-section-rule"></div>',
