@@ -119,10 +119,10 @@ SPX_active_holding = max(SPX_weight - NDX_weight, 0) / active_share
 overlap_holding = min(NDX_weight, SPX_weight) / (1 - active_share)
 ```
 
-Each synthetic chart shows its twelve largest holdings and an `Other` position
-that contains every remaining holding, so the displayed composition still sums
-to exactly 100%. An expandable table below each chart exposes its 50 largest
-holdings with rank, company name, normalized weight, and cumulative weight.
+Each elongated synthetic chart shows its 25 largest holdings. The remaining
+`Other` weight is reported below the chart instead of being drawn as a bar. An
+expandable table below each chart exposes its 50 largest holdings with rank,
+company name, normalized weight, and cumulative weight.
 
 Official iShares holdings downloads are the primary S&P 500 sources. Optional
 local files can be configured with `NON_UCITS_SPX_HOLDINGS_CSV` and

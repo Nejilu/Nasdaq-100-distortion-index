@@ -1251,7 +1251,7 @@ def _active_share_sleeve_figure(
     *,
     weight_column: str,
     color: str,
-    maximum_holdings: int = 12,
+    maximum_holdings: int = 25,
 ) -> go.Figure:
     sleeve = components.loc[
         pd.to_numeric(components[weight_column], errors="coerce").gt(0)
@@ -1262,23 +1262,6 @@ def _active_share_sleeve_figure(
     )
     sleeve = sleeve.sort_values(weight_column, ascending=False)
     visible = sleeve.head(maximum_holdings).copy()
-    remaining = sleeve.iloc[maximum_holdings:]
-    if not remaining.empty:
-        visible = pd.concat(
-            [
-                visible,
-                pd.DataFrame(
-                    {
-                        "ticker": ["Other"],
-                        "company_name": [
-                            f"{len(remaining)} remaining holdings"
-                        ],
-                        weight_column: [float(remaining[weight_column].sum())],
-                    }
-                ),
-            ],
-            ignore_index=True,
-        )
     visible = visible.sort_values(weight_column)
     maximum_weight = float(visible[weight_column].max())
     figure = go.Figure(
@@ -1303,7 +1286,7 @@ def _active_share_sleeve_figure(
     )
     figure.update_layout(
         template="plotly_dark" if IS_DARK_MODE else "plotly_white",
-        height=390,
+        height=max(560, 23 * len(visible) + 100),
         margin={"l": 8, "r": 18, "t": 8, "b": 32},
         showlegend=False,
         bargap=0.27,
@@ -1338,8 +1321,8 @@ def _render_active_share_sleeves(
     st.subheader("Synthetic 100% Active Share portfolios")
     st.caption(
         "Each sleeve is independently renormalized to 100%. The charts show "
-        "the twelve largest synthetic holdings plus an Other position, so "
-        "every displayed portfolio still totals exactly 100%."
+        "the 25 largest synthetic holdings; the remaining Other weight is "
+        "reported directly below each chart."
     )
     specifications = [
         (
@@ -1390,6 +1373,12 @@ def _render_active_share_sleeves(
                 width="stretch",
                 config={"displayModeBar": False},
             )
+            top_25_weight = float(
+                sleeves.components.nlargest(25, weight_column)[
+                    weight_column
+                ].sum()
+            )
+            st.caption(f"Other: {max(0.0, 1.0 - top_25_weight):.2%}")
         detailed = (
             sleeves.components.loc[
                 sleeves.components[weight_column].gt(0),
