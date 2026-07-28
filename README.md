@@ -181,6 +181,8 @@ stage from the persisted live snapshot and makes the annual rules auditable:
 
 - observed company and security concentrations, their distance to each trigger,
   and the corresponding Nasdaq target;
+- a ranked company-level view of the 4.5% cohort, including its cumulative
+  weight against the 48% trigger and 40% adjustment target;
 - cumulative selected-company Modified Market Capitalization before and after
   company capping;
 - the Modified Market Capitalization multiple relative to the ACWI free-float

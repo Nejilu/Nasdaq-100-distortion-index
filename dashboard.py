@@ -1480,86 +1480,312 @@ def _render_annual_thresholds(
     analysis: AnnualRebalanceAnalysis,
 ) -> None:
     thresholds = analysis.thresholds.copy()
-    thresholds["distance_label"] = thresholds["distance_to_trigger"].map(
-        lambda value: (
-            f"{abs(value) * 100:.2f} pp below"
-            if value >= 0
-            else f"{abs(value) * 100:.2f} pp above"
-        )
-    )
     thresholds["status_label"] = np.where(
         thresholds["triggered"],
         "Triggered",
         "Not triggered",
     )
-    colors = thresholds["triggered"].map(
+    thresholds["distance_label"] = thresholds["distance_to_trigger"].map(
+        lambda value: (
+            f"{value * 100:+.2f} pp buffer"
+            if value >= 0
+            else f"{abs(value) * 100:.2f} pp beyond trigger"
+        )
+    )
+    thresholds["color"] = thresholds["triggered"].map(
         {True: NDX_ACTIVE_COLOR, False: "#268463"}
     )
     figure = go.Figure()
+    for _, row in thresholds.iterrows():
+        figure.add_trace(
+            go.Scatter(
+                x=[0.0, row["distance_to_trigger"]],
+                y=[row["label"], row["label"]],
+                mode="lines",
+                line={"color": row["color"], "width": 5},
+                opacity=0.42,
+                hoverinfo="skip",
+                showlegend=False,
+            )
+        )
     figure.add_trace(
-        go.Bar(
-            x=thresholds["actual"],
+        go.Scatter(
+            x=thresholds["distance_to_trigger"],
             y=thresholds["label"],
-            orientation="h",
-            marker={"color": colors, "line": {"width": 0}},
-            text=thresholds.apply(
-                lambda row: (
-                    f"{row['actual']:.2%} | {row['distance_label']}"
-                ),
-                axis=1,
+            mode="markers+text",
+            marker={
+                "color": thresholds["color"],
+                "size": 18,
+                "symbol": "circle",
+                "line": {"color": THEME["marker_outline"], "width": 1.5},
+            },
+            text=thresholds["distance_to_trigger"].map(
+                lambda value: (
+                    f"+{value * 100:.2f} pp"
+                    if value >= 0
+                    else f"{value * 100:.2f} pp"
+                )
             ),
-            textposition="outside",
-            textfont={"color": colors, "size": 10},
+            textposition=[
+                "middle right" if value >= 0 else "middle left"
+                for value in thresholds["distance_to_trigger"]
+            ],
+            textfont={
+                "color": thresholds["color"].tolist(),
+                "size": 11,
+            },
             cliponaxis=False,
             customdata=thresholds[
-                ["threshold", "target", "status_label", "rule"]
+                [
+                    "actual",
+                    "threshold",
+                    "target",
+                    "status_label",
+                    "distance_label",
+                    "rule",
+                ]
             ].to_numpy(),
             hovertemplate=(
                 "<b>%{y}</b><br>"
-                "Observed input: %{x:.2%}<br>"
-                "Trigger: %{customdata[0]:.2%}<br>"
-                "Adjustment target: %{customdata[1]:.2%}<br>"
-                "Status: %{customdata[2]}<br>"
-                "%{customdata[3]}"
-                "<extra></extra>"
+                "Observed input: %{customdata[0]:.2%}<br>"
+                "Trigger: %{customdata[1]:.2%}<br>"
+                "Adjustment target: %{customdata[2]:.2%}<br>"
+                "%{customdata[4]}<br>"
+                "%{customdata[5]}<extra></extra>"
             ),
-            name="Observed input",
+            showlegend=False,
         )
     )
-    figure.add_trace(
-        go.Scatter(
-            x=thresholds["threshold"],
-            y=thresholds["label"],
-            mode="markers",
-            marker={
-                "color": "#d69a2d",
-                "size": 11,
-                "symbol": "diamond",
-                "line": {"color": THEME["marker_outline"], "width": 1},
-            },
-            customdata=thresholds[["rule"]].to_numpy(),
-            hovertemplate=(
-                "<b>%{y}</b><br>"
-                "Trigger threshold: %{x:.2%}<br>"
-                "%{customdata[0]}<extra></extra>"
-            ),
-            name="Rule trigger",
-        )
+    minimum = min(
+        float(thresholds["distance_to_trigger"].min()),
+        -0.025,
     )
-    maximum = float(
-        thresholds[["actual", "threshold"]].to_numpy().max()
+    maximum = max(
+        float(thresholds["distance_to_trigger"].max()),
+        0.025,
+    )
+    padding = max((maximum - minimum) * 0.24, 0.035)
+    figure.add_vrect(
+        x0=minimum - padding,
+        x1=0,
+        fillcolor=NDX_ACTIVE_COLOR,
+        opacity=0.055,
+        line_width=0,
+        layer="below",
+    )
+    figure.add_vrect(
+        x0=0,
+        x1=maximum + padding,
+        fillcolor="#268463",
+        opacity=0.045,
+        line_width=0,
+        layer="below",
+    )
+    figure.add_vline(
+        x=0,
+        line_width=1.5,
+        line_color=THEME["chart_zero"],
+    )
+    figure.add_annotation(
+        x=0,
+        y=1.12,
+        xref="x",
+        yref="paper",
+        text="OFFICIAL TRIGGER",
+        showarrow=False,
+        font={"color": THEME["muted"], "size": 9},
+    )
+    figure.add_annotation(
+        x=minimum - padding * 0.55,
+        y=1.12,
+        xref="x",
+        yref="paper",
+        text="RULE ACTIVE",
+        showarrow=False,
+        font={"color": NDX_ACTIVE_COLOR, "size": 9},
+    )
+    figure.add_annotation(
+        x=maximum + padding * 0.55,
+        y=1.12,
+        xref="x",
+        yref="paper",
+        text="BUFFER REMAINING",
+        showarrow=False,
+        font={"color": "#268463", "size": 9},
     )
     figure.update_layout(
         template="plotly_dark" if IS_DARK_MODE else "plotly_white",
-        height=350,
-        margin={"l": 8, "r": 165, "t": 8, "b": 35},
-        barmode="overlay",
-        bargap=0.38,
-        barcornerradius=6,
+        height=330,
+        margin={"l": 8, "r": 78, "t": 38, "b": 38},
+        showlegend=False,
+        paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor="rgba(0,0,0,0)",
+        font={"color": THEME["chart_font"], "size": 11},
+        xaxis={
+            "title": "Distance to trigger (percentage points)",
+            "tickformat": "+.0%",
+            "range": [minimum - padding, maximum + padding],
+            "gridcolor": THEME["chart_grid"],
+            "zeroline": False,
+        },
+        yaxis={
+            "title": None,
+            "showgrid": False,
+            "autorange": "reversed",
+        },
+    )
+    st.subheader("Distance to annual capping triggers")
+    st.caption(
+        "Zero is the official trigger. A point to the left means the rule is "
+        "active; a point to the right shows the remaining buffer. Hover for "
+        "the observed input and adjustment target."
+    )
+    st.plotly_chart(
+        figure,
+        width="stretch",
+        config={"displayModeBar": False},
+    )
+
+
+def _annual_company_cohort_figure(
+    analysis: AnnualRebalanceAnalysis,
+) -> go.Figure:
+    companies = analysis.companies.sort_values(
+        "stage_one_weight",
+        ascending=False,
+    ).copy()
+    companies["rank"] = np.arange(1, len(companies) + 1)
+    companies["qualifies"] = companies["stage_one_weight"].gt(0.045 + 1e-12)
+    cohort = companies.loc[companies["qualifies"]].copy()
+    cohort["cohort_cumulative"] = cohort["stage_one_weight"].cumsum()
+    point_colors = np.where(
+        companies["qualifies"],
+        NDX_ACTIVE_COLOR,
+        SPX_ACTIVE_COLOR,
+    )
+    point_sizes = 7 + 27 * (
+        companies["stage_one_weight"] / companies["stage_one_weight"].max()
+    )
+
+    figure = go.Figure()
+    figure.add_trace(
+        go.Scatter(
+            x=companies["rank"],
+            y=companies["stage_one_weight"],
+            mode="lines+markers",
+            name="Weight entering the 4.5% test",
+            line={"color": SPX_ACTIVE_COLOR, "width": 2},
+            fill="tozeroy",
+            fillcolor="rgba(47,95,152,0.08)",
+            marker={
+                "color": point_colors,
+                "size": point_sizes,
+                "opacity": 0.86,
+                "line": {"color": THEME["marker_outline"], "width": 0.8},
+            },
+            customdata=companies[
+                [
+                    "company_name",
+                    "tickers",
+                    "initial_weight",
+                    "final_weight",
+                    "capping_change",
+                    "qualifies",
+                ]
+            ].to_numpy(),
+            hovertemplate=(
+                "Modified Market Cap rank %{x}<br>"
+                "<b>%{customdata[0]}</b> (%{customdata[1]})<br>"
+                "Raw Modified Market Cap weight: %{customdata[2]:.2%}<br>"
+                "Weight entering cohort test: %{y:.2%}<br>"
+                "Final company weight: %{customdata[3]:.2%}<br>"
+                "Capping change: %{customdata[4]:+.2%}<br>"
+                "Above 4.5%: %{customdata[5]}<extra></extra>"
+            ),
+        )
+    )
+    if not cohort.empty:
+        figure.add_trace(
+            go.Scatter(
+                x=cohort["rank"],
+                y=cohort["cohort_cumulative"],
+                mode="lines+markers",
+                name="Cumulative >4.5% cohort",
+                yaxis="y2",
+                line={"color": NDX_ACTIVE_COLOR, "width": 3},
+                marker={
+                    "color": NDX_ACTIVE_COLOR,
+                    "size": 8,
+                    "line": {
+                        "color": THEME["marker_outline"],
+                        "width": 0.8,
+                    },
+                },
+                customdata=cohort[
+                    ["company_name", "tickers", "stage_one_weight"]
+                ].to_numpy(),
+                hovertemplate=(
+                    "Cohort member %{x}<br>"
+                    "<b>%{customdata[0]}</b> (%{customdata[1]})<br>"
+                    "Company weight: %{customdata[2]:.2%}<br>"
+                    "Cumulative cohort weight: %{y:.2%}<extra></extra>"
+                ),
+            )
+        )
+        last_rank = int(cohort["rank"].max())
+        for value, color, label, dash in [
+            (0.48, "#d69a2d", "48% trigger", "dash"),
+            (0.40, "#268463", "40% target", "dot"),
+        ]:
+            figure.add_shape(
+                type="line",
+                x0=0.7,
+                x1=last_rank + 0.3,
+                y0=value,
+                y1=value,
+                xref="x",
+                yref="y2",
+                line={"color": color, "width": 1.5, "dash": dash},
+            )
+            figure.add_annotation(
+                x=last_rank + 0.45,
+                y=value,
+                xref="x",
+                yref="y2",
+                text=label,
+                showarrow=False,
+                xanchor="left",
+                font={"color": color, "size": 10},
+            )
+        figure.add_vline(
+            x=last_rank + 0.5,
+            line_width=1,
+            line_dash="dot",
+            line_color=THEME["chart_zero"],
+            annotation_text=f"{len(cohort)} companies in cohort",
+            annotation_position="top right",
+        )
+    figure.add_hline(
+        y=0.045,
+        line_width=1.5,
+        line_dash="dash",
+        line_color=NDX_ACTIVE_COLOR,
+        annotation_text="4.5% company threshold",
+        annotation_position="top right",
+    )
+    cumulative_max = max(
+        float(cohort["cohort_cumulative"].max()) if not cohort.empty else 0.0,
+        0.50,
+    )
+    figure.update_layout(
+        template="plotly_dark" if IS_DARK_MODE else "plotly_white",
+        height=500,
+        margin={"l": 8, "r": 82, "t": 35, "b": 42},
+        hovermode="x",
         legend={
             "orientation": "h",
             "yanchor": "bottom",
-            "y": 1.02,
+            "y": 1.04,
             "xanchor": "left",
             "x": 0,
             "font": {"color": THEME["chart_font"], "size": 10},
@@ -1568,24 +1794,28 @@ def _render_annual_thresholds(
         plot_bgcolor="rgba(0,0,0,0)",
         font={"color": THEME["chart_font"], "size": 11},
         xaxis={
-            "title": None,
-            "tickformat": ".0%",
-            "range": [0, max(0.65, maximum * 1.28)],
+            "title": "Company rank by Modified Market Cap",
+            "showgrid": False,
+            "range": [0.5, max(len(companies), 100) + 0.5],
+        },
+        yaxis={
+            "title": "Individual company weight",
+            "tickformat": ".1%",
+            "range": [0, float(companies["stage_one_weight"].max()) * 1.16],
             "gridcolor": THEME["chart_grid"],
             "zeroline": False,
         },
-        yaxis={"title": None, "showgrid": False},
+        yaxis2={
+            "title": "Cumulative qualifying cohort",
+            "tickformat": ".0%",
+            "overlaying": "y",
+            "side": "right",
+            "range": [0, cumulative_max * 1.12],
+            "showgrid": False,
+            "zeroline": False,
+        },
     )
-    st.subheader("Distance to annual capping triggers")
-    st.caption(
-        "Bars are the exact inputs tested at each stage. Diamonds mark the "
-        "official trigger; negative distance means the rule is active."
-    )
-    st.plotly_chart(
-        figure,
-        width="stretch",
-        config={"displayModeBar": False},
-    )
+    return figure
 
 
 def _annual_cumulative_weights_figure(
@@ -1936,6 +2166,25 @@ def _render_annual_reconstitution_panel(
         )
 
     _render_annual_thresholds(analysis)
+
+    cohort_rule = analysis.thresholds.loc[
+        analysis.thresholds["rule_id"].eq("company_cohort")
+    ].iloc[0]
+    qualifying_companies = int(
+        analysis.companies["stage_one_weight"].gt(0.045 + 1e-12).sum()
+    )
+    st.subheader("Inside the 4.5% company cohort")
+    st.caption(
+        f"The 4.5% level selects {qualifying_companies} companies; it is not "
+        "the aggregate trigger. Their weights entering the test add up to "
+        f"{float(cohort_rule['actual']):.2%}. At 48%, Nasdaq reduces the "
+        "cohort to a 40% aggregate weight while preserving company rank."
+    )
+    st.plotly_chart(
+        _annual_company_cohort_figure(analysis),
+        width="stretch",
+        config={"displayModeBar": False},
+    )
 
     st.subheader("Modified Market Cap inputs and concentration")
     st.caption(
