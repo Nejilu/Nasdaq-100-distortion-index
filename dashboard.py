@@ -1299,7 +1299,7 @@ def _active_share_sleeve_figure(
             "tickformat": ".0%",
             "gridcolor": THEME["chart_grid"],
             "zeroline": False,
-            "range": [0, max(maximum_weight * 1.28, 0.05)],
+            "range": [0, max(maximum_weight * 1.4, 0.05)],
         },
         yaxis={"title": None, "showgrid": False, "automargin": True},
     )
@@ -1347,23 +1347,18 @@ def _render_active_share_sleeves(
             ACTIVE_OVERLAP_COLOR,
         ),
     ]
-    for index, (
+    sleeve_columns = st.columns(3, gap="large")
+    for column, (
         title,
         description,
         weight_column,
         source_mass,
         color,
-    ) in enumerate(specifications):
-        columns = st.columns(
-            [0.26, 0.74],
-            gap="large",
-            vertical_alignment="center",
-        )
-        with columns[0]:
+    ) in zip(sleeve_columns, specifications, strict=True):
+        with column:
             st.markdown(f"**{title}**")
             st.metric("Original portfolio mass", f"{source_mass:.2%}")
             st.caption(f"{description} Synthetic holdings sum to 100%.")
-        with columns[1]:
             st.plotly_chart(
                 _active_share_sleeve_figure(
                     sleeves.components,
@@ -1400,23 +1395,19 @@ def _render_active_share_sleeves(
                 "company_name": "Company",
             }
         )[["Rank", "Ticker", "Company", "Weight", "Cumulative weight"]]
-        with st.expander(f"Top {len(detailed)} holdings - {title}"):
-            st.caption(
-                f"These holdings represent "
-                f"{sleeves.components.nlargest(50, weight_column)[weight_column].sum():.2%} "
-                "of the normalized synthetic portfolio."
-            )
-            st.dataframe(
-                detailed,
-                hide_index=True,
-                width="stretch",
-                height=520,
-            )
-        if index < len(specifications) - 1:
-            st.markdown(
-                '<div class="ndx-section-rule"></div>',
-                unsafe_allow_html=True,
-            )
+        with column:
+            with st.expander(f"Top {len(detailed)} holdings - {title}"):
+                st.caption(
+                    f"These holdings represent "
+                    f"{sleeves.components.nlargest(50, weight_column)[weight_column].sum():.2%} "
+                    "of the normalized synthetic portfolio."
+                )
+                st.dataframe(
+                    detailed,
+                    hide_index=True,
+                    width="stretch",
+                    height=520,
+                )
 
 
 def _render_active_share_panel(
