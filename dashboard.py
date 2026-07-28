@@ -12,6 +12,7 @@ import plotly.graph_objects as go
 import streamlit as st
 from dotenv import load_dotenv
 
+from active_share import calculate_active_share_sleeves
 from database import SnapshotDatabase
 from snapshot_service import recompute_snapshot
 
@@ -1245,6 +1246,170 @@ def _render_active_share_top_x(
     )
 
 
+def _active_share_sleeve_figure(
+    components: pd.DataFrame,
+    *,
+    weight_column: str,
+    color: str,
+    maximum_holdings: int = 25,
+) -> go.Figure:
+    sleeve = components.loc[
+        pd.to_numeric(components[weight_column], errors="coerce").gt(0)
+    ].copy()
+    sleeve[weight_column] = pd.to_numeric(
+        sleeve[weight_column],
+        errors="coerce",
+    )
+    sleeve = sleeve.sort_values(weight_column, ascending=False)
+    visible = sleeve.head(maximum_holdings).copy()
+    visible = visible.sort_values(weight_column)
+    maximum_weight = float(visible[weight_column].max())
+    figure = go.Figure(
+        go.Bar(
+            x=visible[weight_column],
+            y=visible["ticker"],
+            orientation="h",
+            marker={"color": color, "line": {"width": 0}},
+            opacity=0.9,
+            text=visible[weight_column].map(lambda value: f"{value:.1%}"),
+            textposition="outside",
+            textfont={"color": color, "size": 10},
+            cliponaxis=False,
+            customdata=visible[["company_name"]].to_numpy(),
+            hovertemplate=(
+                "<b>%{y}</b><br>"
+                "%{customdata[0]}<br>"
+                "Synthetic ETF weight: %{x:.2%}"
+                "<extra></extra>"
+            ),
+        )
+    )
+    figure.update_layout(
+        template="plotly_dark" if IS_DARK_MODE else "plotly_white",
+        height=max(560, 23 * len(visible) + 100),
+        margin={"l": 8, "r": 18, "t": 8, "b": 32},
+        showlegend=False,
+        bargap=0.27,
+        barcornerradius=5,
+        paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor="rgba(0,0,0,0)",
+        font={"color": THEME["chart_font"], "size": 11},
+        xaxis={
+            "title": None,
+            "tickformat": ".0%",
+            "gridcolor": THEME["chart_grid"],
+            "zeroline": False,
+            "range": [0, max(maximum_weight * 1.4, 0.05)],
+        },
+        yaxis={"title": None, "showgrid": False, "automargin": True},
+    )
+    return figure
+
+
+def _render_active_share_sleeves(
+    components: pd.DataFrame,
+    *,
+    rebalanced_view: bool,
+) -> None:
+    ndx_column = (
+        "rebalanced_ndx_weight" if rebalanced_view else "ndx_weight"
+    )
+    sleeves = calculate_active_share_sleeves(
+        components,
+        ndx_weight_column=ndx_column,
+    )
+    st.subheader("Synthetic 100% Active Share portfolios")
+    st.caption(
+        "Each sleeve is independently renormalized to 100%. The charts show "
+        "the 25 largest synthetic holdings; the remaining Other weight is "
+        "reported directly below each chart."
+    )
+    specifications = [
+        (
+            "NDX active sleeve",
+            "Positive NDX weight differences versus the S&P 500.",
+            "ndx_active_weight",
+            sleeves.ndx_active_mass,
+            NDX_ACTIVE_COLOR,
+        ),
+        (
+            "S&P 500 active sleeve",
+            "Positive S&P 500 weight differences versus the NDX.",
+            "spx_active_weight",
+            sleeves.spx_active_mass,
+            SPX_ACTIVE_COLOR,
+        ),
+        (
+            "Shared overlap sleeve",
+            "The common weight held by both index exposures.",
+            "overlap_weight",
+            sleeves.overlap_mass,
+            ACTIVE_OVERLAP_COLOR,
+        ),
+    ]
+    sleeve_columns = st.columns(3, gap="large")
+    for column, (
+        title,
+        description,
+        weight_column,
+        source_mass,
+        color,
+    ) in zip(sleeve_columns, specifications, strict=True):
+        with column:
+            st.markdown(f"**{title}**")
+            st.metric("Original portfolio mass", f"{source_mass:.2%}")
+            st.caption(f"{description} Synthetic holdings sum to 100%.")
+            st.plotly_chart(
+                _active_share_sleeve_figure(
+                    sleeves.components,
+                    weight_column=weight_column,
+                    color=color,
+                ),
+                width="stretch",
+                config={"displayModeBar": False},
+            )
+            top_25_weight = float(
+                sleeves.components.nlargest(25, weight_column)[
+                    weight_column
+                ].sum()
+            )
+            st.caption(f"Other: {max(0.0, 1.0 - top_25_weight):.2%}")
+        detailed = (
+            sleeves.components.loc[
+                sleeves.components[weight_column].gt(0),
+                ["ticker", "company_name", weight_column],
+            ]
+            .nlargest(50, weight_column)
+            .reset_index(drop=True)
+        )
+        detailed.insert(0, "Rank", np.arange(1, len(detailed) + 1))
+        detailed["Weight"] = detailed[weight_column].map(
+            lambda value: f"{value:.2%}"
+        )
+        detailed["Cumulative weight"] = detailed[weight_column].cumsum().map(
+            lambda value: f"{value:.2%}"
+        )
+        detailed = detailed.rename(
+            columns={
+                "ticker": "Ticker",
+                "company_name": "Company",
+            }
+        )[["Rank", "Ticker", "Company", "Weight", "Cumulative weight"]]
+        with column:
+            with st.expander(f"Top {len(detailed)} holdings - {title}"):
+                st.caption(
+                    f"These holdings represent "
+                    f"{sleeves.components.nlargest(50, weight_column)[weight_column].sum():.2%} "
+                    "of the normalized synthetic portfolio."
+                )
+                st.dataframe(
+                    detailed,
+                    hide_index=True,
+                    width="stretch",
+                    height=520,
+                )
+
+
 def _render_active_share_panel(
     database: SnapshotDatabase,
     snapshot: dict[str, object],
@@ -1293,6 +1458,10 @@ def _render_active_share_panel(
         rebalanced_view=rebalanced_view,
     )
     _render_active_share_top_x(
+        components,
+        rebalanced_view=rebalanced_view,
+    )
+    _render_active_share_sleeves(
         components,
         rebalanced_view=rebalanced_view,
     )
