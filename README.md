@@ -174,6 +174,29 @@ discretion and does not publish every review input. The snapshot records
 `rebalance_status`, source, coverage, additions, removals, fallbacks, and notes
 so this limitation remains visible through SQLite and the API.
 
+### Annual reconstitution dashboard
+
+The dedicated **Annual Reconstitution** panel reconstructs every weighting
+stage from the persisted live snapshot and makes the annual rules auditable:
+
+- observed company and security concentrations, their distance to each trigger,
+  and the corresponding Nasdaq target;
+- cumulative selected-company Modified Market Capitalization before and after
+  company capping;
+- the Modified Market Capitalization multiple relative to the ACWI free-float
+  input, including the `3x` ceiling;
+- company-stage, security-stage, and total redistributed weight;
+- cumulative transfers by initial rank, the largest donors and recipients, and
+  rank preservation measured separately at each official capping stage;
+- current versus simulated annual weights, plus simulated index entries and
+  exits.
+
+An audit expander exposes the reconstructed stage values and residuals. The
+snapshot does not persist unselected candidates ranked 101-125, so the panel
+does not infer or display a fictitious distance to those selection cutoffs. It
+shows the selected 100-company distribution and the simulated membership
+changes instead.
+
 ## Capitalization references
 
 The two dashboard bases are analytical comparison scenarios:
@@ -285,6 +308,8 @@ used.
 qqq_holdings_provider.py  # Nasdaq-100 and S&P 500 iShares provider chains
 acwi_weights_provider.py  # ACWI matching, ADR labels, calibrated fallbacks
 active_share.py           # NDX/SPX union, normalization, and Active Share
+nasdaq100_rebalance.py    # annual/quarterly selection and weighting engine
+rebalance_analytics.py    # annual thresholds, stages, transfers, and rank audit
 edgar_quarterly_history.py # N-PORT archive, CUSIP history, quarterly scores
 market_data_provider.py   # live market data through yfinance
 distortion_engine.py      # pure calculations, coverage, and statuses
