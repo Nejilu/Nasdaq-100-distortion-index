@@ -5,9 +5,14 @@ from __future__ import annotations
 from concurrent.futures import ThreadPoolExecutor, wait
 from dataclasses import dataclass
 from pathlib import Path
+import time
 from typing import Protocol, Sequence
 
+import numpy as np
 import pandas as pd
+
+from ndx_wdi.domain.market_quality import evaluate_float_observations  # noqa: F401
+from provider_cache import ProviderCache
 
 
 FLOAT_SHARES_OVERRIDES = {
@@ -40,7 +45,12 @@ class YFinanceMarketDataProvider:
     max_workers: int = 8
     batch_timeout_seconds: float = 60.0
     cache_dir: str | Path = "data/yfinance_cache"
+    persistent_cache_path: str | Path | None = None
+    price_ttl_seconds: float = 10 * 60
+    fundamentals_ttl_seconds: float = 24 * 60 * 60
+    failure_retry_seconds: float = 60
     source_name: str = "yfinance"
+    cache_status: str = "disabled"
 
     def _configure_cache(self) -> None:
         """Keep yfinance SQLite caches inside the writable project directory."""
@@ -71,6 +81,17 @@ class YFinanceMarketDataProvider:
     def get_market_data(self, tickers: Sequence[str]) -> pd.DataFrame:
         self._configure_cache()
         unique_tickers = list(dict.fromkeys(str(ticker).upper() for ticker in tickers))
+        if self.persistent_cache_path is not None:
+            rows = self._get_cached_market_data(unique_tickers)
+        else:
+            rows = self._fetch_many(unique_tickers)
+        normalized = _allocate_shared_float_shares(
+            _normalize_market_data(pd.DataFrame(rows))
+        )
+        return _apply_share_overrides(normalized)
+
+    def _fetch_many(self, tickers: Sequence[str]) -> list[dict[str, object]]:
+        unique_tickers = list(dict.fromkeys(str(ticker).upper() for ticker in tickers))
         rows: list[dict[str, object]] = []
         worker_count = max(1, min(int(self.max_workers), max(len(unique_tickers), 1)))
         executor = ThreadPoolExecutor(max_workers=worker_count)
@@ -97,8 +118,143 @@ class YFinanceMarketDataProvider:
                 )
         finally:
             executor.shutdown(wait=False, cancel_futures=True)
-        normalized = _allocate_shared_float_shares(_normalize_market_data(pd.DataFrame(rows)))
-        return _apply_share_overrides(normalized)
+        return rows
+
+    @staticmethod
+    def _fetch_prices(tickers: Sequence[str]) -> dict[str, float]:
+        if not tickers:
+            return {}
+        import yfinance as yf
+
+        unique_tickers = list(dict.fromkeys(tickers))
+        history = yf.download(
+            tickers=unique_tickers,
+            period="5d",
+            auto_adjust=False,
+            progress=False,
+            threads=min(8, len(unique_tickers)),
+            group_by="column",
+            timeout=10,
+        )
+        if history.empty or "Close" not in history:
+            return {}
+        close = history["Close"]
+        prices: dict[str, float] = {}
+        if isinstance(close, pd.Series):
+            valid = pd.to_numeric(close, errors="coerce").dropna()
+            if not valid.empty and len(unique_tickers) == 1:
+                prices[unique_tickers[0]] = float(valid.iloc[-1])
+            return prices
+        for ticker in unique_tickers:
+            if ticker not in close:
+                continue
+            valid = pd.to_numeric(close[ticker], errors="coerce").dropna()
+            if not valid.empty:
+                prices[ticker] = float(valid.iloc[-1])
+        return prices
+
+    def _get_cached_market_data(
+        self,
+        tickers: Sequence[str],
+    ) -> list[dict[str, object]]:
+        cache = ProviderCache(self.persistent_cache_path)
+        cached = cache.get_market_data(tickers)
+        cached_by_ticker = (
+            cached.set_index("ticker").to_dict(orient="index")
+            if not cached.empty
+            else {}
+        )
+        now = time.time()
+        fundamentals_to_fetch: list[str] = []
+        prices_to_fetch: list[str] = []
+        for ticker in tickers:
+            row = cached_by_ticker.get(ticker, {})
+            fundamentals_age = _age_seconds(
+                now,
+                row.get("fundamentals_fetched_at"),
+            )
+            attempt_age = _age_seconds(
+                now,
+                row.get("fundamentals_attempted_at"),
+            )
+            price_age = _age_seconds(now, row.get("price_fetched_at"))
+            fundamentals_fresh = fundamentals_age <= self.fundamentals_ttl_seconds
+            retry_blocked = (
+                fundamentals_age > self.fundamentals_ttl_seconds
+                and attempt_age <= self.failure_retry_seconds
+            )
+            if not fundamentals_fresh and not retry_blocked:
+                fundamentals_to_fetch.append(ticker)
+            if price_age > self.price_ttl_seconds:
+                prices_to_fetch.append(ticker)
+
+        price_executor = ThreadPoolExecutor(max_workers=1)
+        price_future = (
+            price_executor.submit(self._fetch_prices, prices_to_fetch)
+            if prices_to_fetch
+            else None
+        )
+        fetched_fundamentals = (
+            self._fetch_many(fundamentals_to_fetch)
+            if fundamentals_to_fetch
+            else []
+        )
+        fetched_by_ticker = {
+            str(row.get("ticker", "")).upper(): row
+            for row in fetched_fundamentals
+        }
+        prices: dict[str, float] = {}
+        if price_future is not None:
+            try:
+                prices = price_future.result(
+                    timeout=max(min(self.batch_timeout_seconds, 15.0), 0.01)
+                )
+            except Exception:
+                price_future.cancel()
+        price_executor.shutdown(wait=False, cancel_futures=True)
+
+        output_rows: list[dict[str, object]] = []
+        for ticker in tickers:
+            row = dict(cached_by_ticker.get(ticker, {}))
+            row["ticker"] = ticker
+            fetched = fetched_by_ticker.get(ticker)
+            if fetched is not None:
+                row["fundamentals_attempted_at"] = now
+                if _has_valid_fundamentals(fetched):
+                    for column in [
+                        "float_shares",
+                        "shares_outstanding",
+                        "market_cap",
+                        "float_shares_status",
+                        "shares_outstanding_status",
+                    ]:
+                        row[column] = fetched.get(column)
+                    row["fundamentals_fetched_at"] = now
+                row["market_data_error"] = fetched.get("market_data_error")
+                fetched_price = _positive_number(fetched.get("price"))
+                if fetched_price is not None:
+                    row["price"] = fetched_price
+                    row["price_fetched_at"] = now
+            if ticker in prices:
+                row["price"] = prices[ticker]
+                row["price_fetched_at"] = now
+            output_rows.append(row)
+
+        cache.upsert_market_data(pd.DataFrame(output_rows))
+        cached_count = len(cached_by_ticker)
+        network_count = len(
+            set(fundamentals_to_fetch).union(prices_to_fetch)
+        )
+        if network_count == 0:
+            self.cache_status = f"fresh_hit:{cached_count}/{len(tickers)}"
+        elif cached_count:
+            self.cache_status = (
+                f"partial_hit:{cached_count}/{len(tickers)};"
+                f"network:{network_count}"
+            )
+        else:
+            self.cache_status = f"miss;network:{network_count}"
+        return output_rows
 
 
 def _normalize_market_data(frame: pd.DataFrame) -> pd.DataFrame:
@@ -180,54 +336,31 @@ def _apply_share_overrides(frame: pd.DataFrame) -> pd.DataFrame:
     return result
 
 
-def evaluate_float_observations(
-    frame: pd.DataFrame,
-    *,
-    float_shares_tolerance: float = 1.10,
-    float_cap_tolerance: float = 1.25,
-) -> pd.DataFrame:
-    """Return common validity masks for every float-based provider path."""
-    data = frame.copy()
-    for column in ["price", "float_shares", "shares_outstanding", "market_cap"]:
-        if column not in data:
-            data[column] = pd.NA
-        data[column] = pd.to_numeric(data[column], errors="coerce")
+def _age_seconds(now: float, fetched_at: object) -> float:
+    try:
+        value = float(fetched_at)
+    except (TypeError, ValueError):
+        return float("inf")
+    if not np.isfinite(value):
+        return float("inf")
+    return max(0.0, now - value)
 
-    quality = pd.DataFrame(index=data.index)
-    quality["price_valid"] = data["price"].notna() & data["price"].gt(0)
-    quality["float_valid"] = (
-        data["float_shares"].notna() & data["float_shares"].gt(0)
+
+def _positive_number(value: object) -> float | None:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not np.isfinite(number) or number <= 0:
+        return None
+    return number
+
+
+def _has_valid_fundamentals(row: dict[str, object]) -> bool:
+    return any(
+        _positive_number(row.get(column)) is not None
+        for column in ["float_shares", "shares_outstanding", "market_cap"]
     )
-    quality["outstanding_valid"] = (
-        data["shares_outstanding"].notna()
-        & data["shares_outstanding"].gt(0)
-    )
-    quality["market_cap_valid"] = (
-        data["market_cap"].notna() & data["market_cap"].gt(0)
-    )
-    quality["float_cap"] = data["price"] * data["float_shares"]
-    quality["inconsistent"] = (
-        quality["float_valid"]
-        & quality["outstanding_valid"]
-        & (
-            data["float_shares"]
-            > data["shares_outstanding"] * float_shares_tolerance
-        )
-    ) | (
-        quality["price_valid"]
-        & quality["float_valid"]
-        & quality["market_cap_valid"]
-        & (
-            quality["float_cap"]
-            > data["market_cap"] * float_cap_tolerance
-        )
-    )
-    quality["valid"] = (
-        quality["price_valid"]
-        & quality["float_valid"]
-        & ~quality["inconsistent"]
-    )
-    return quality
 
 
 def _missing_market_data_row(ticker: str, error: str) -> dict[str, object]:

@@ -11,26 +11,39 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from active_share import ActiveShareResult, calculate_active_share
 from acwi_weights_provider import (
     DEFAULT_ACWI_URL,
     IsharesAcwiFloatWeightsProvider,
     classify_security_types,
 )
+from background_jobs import submit_unique
+from cached_providers import (
+    CachedAcwiFloatWeightsProvider,
+    CachedHoldingsProvider,
+    provider_cache_key,
+)
 from database import SnapshotDatabase
-from distortion_engine import DistortionResult, calculate_distortion
 from market_data_provider import (
     FLOAT_SHARES_OVERRIDE_STATUS,
     YFinanceMarketDataProvider,
-    evaluate_float_observations,
 )
-from nasdaq100_rebalance import (
-    NasdaqPublicUniverseProvider,
+from ndx_wdi.domain.active_share import ActiveShareResult, calculate_active_share
+from ndx_wdi.domain.distortion import DistortionResult, calculate_distortion
+from ndx_wdi.domain.market_quality import evaluate_float_observations
+from ndx_wdi.domain.rebalance import (
     RebalanceResult,
     fallback_current_selection,
     simulate_rebalance,
 )
+from nasdaq100_rebalance import (
+    NasdaqPublicUniverseProvider,
+)
 from observability import PipelineMetrics, performance_status, structured_event
+from provider_cache import (
+    ProviderCache,
+    background_job_key,
+    holdings_fingerprint,
+)
 from qqq_holdings_provider import (
     DEFAULT_CNDX_URL,
     DEFAULT_CSPX_URL,
@@ -66,6 +79,7 @@ class RecomputeOutcome:
     performance_status: str = "unknown"
     timings_ms: dict[str, float] | None = None
     cache_statuses: dict[str, str] | None = None
+    background_refresh_queued: bool = False
 
     def summary(self) -> dict[str, object]:
         summary = {
@@ -90,6 +104,7 @@ class RecomputeOutcome:
             "performance_status": self.performance_status,
             "timings_ms": dict(self.timings_ms or {}),
             "cache_statuses": dict(self.cache_statuses or {}),
+            "background_refresh_queued": self.background_refresh_queued,
         }
         if self.rebalance is not None:
             summary.update(
@@ -134,6 +149,7 @@ def recompute_snapshot(
     holdings_csv: str | Path | None = None,
     universe: str = "non_ucits",
     weighting_basis: str = "float",
+    background_refresh: bool = True,
 ) -> RecomputeOutcome:
     """Compute and persist one snapshot from live holdings and market data."""
     metrics = PipelineMetrics()
@@ -144,6 +160,7 @@ def recompute_snapshot(
             universe=universe,
             weighting_basis=weighting_basis,
             metrics=metrics,
+            background_refresh=background_refresh,
         )
     except Exception as exc:
         metrics.finish()
@@ -180,6 +197,7 @@ def _recompute_snapshot(
     universe: str,
     weighting_basis: str,
     metrics: PipelineMetrics,
+    background_refresh: bool,
 ) -> RecomputeOutcome:
     if universe not in UNIVERSES:
         raise ValueError(f"universe must be one of: {UNIVERSES}.")
@@ -188,50 +206,115 @@ def _recompute_snapshot(
     database = SnapshotDatabase(db_path or os.getenv("NDX_DB_PATH", "data/ndx_wdi.sqlite3"))
     metrics.checkpoint("database_initialize")
     coverage_threshold = float(os.getenv("NDX_COVERAGE_THRESHOLD", "0.99"))
+    provider_cache_path = os.getenv(
+        "NDX_PROVIDER_CACHE_PATH",
+        "data/provider_cache.sqlite3",
+    )
+    provider_cache = ProviderCache(provider_cache_path)
+    provider_holdings_ttl_seconds = float(
+        os.getenv("PROVIDER_HOLDINGS_TTL_SECONDS", "21600")
+    )
 
-    holdings_provider = build_holdings_chain(universe, holdings_csv=holdings_csv)
+    base_holdings_provider = build_holdings_chain(
+        universe,
+        holdings_csv=holdings_csv,
+    )
+    if holdings_csv is None:
+        holdings_provider = CachedHoldingsProvider(
+            provider=base_holdings_provider,
+            cache=provider_cache,
+            cache_key=provider_cache_key(
+                f"ndx-holdings:{universe}",
+                base_holdings_provider,
+            ),
+            ttl_seconds=provider_holdings_ttl_seconds,
+        )
+    else:
+        holdings_provider = base_holdings_provider
     market_provider = YFinanceMarketDataProvider(
         max_workers=int(os.getenv("YFINANCE_MAX_WORKERS", "8")),
         batch_timeout_seconds=float(
             os.getenv("YFINANCE_BATCH_TIMEOUT_SECONDS", "60")
         ),
         cache_dir=os.getenv("YFINANCE_CACHE_DIR", "data/yfinance_cache"),
+        persistent_cache_path=os.getenv(
+            "YFINANCE_MARKET_CACHE_PATH",
+            provider_cache_path,
+        ),
+        price_ttl_seconds=float(
+            os.getenv("YFINANCE_PRICE_TTL_SECONDS", "600")
+        ),
+        fundamentals_ttl_seconds=float(
+            os.getenv("YFINANCE_FUNDAMENTALS_TTL_SECONDS", "86400")
+        ),
+        failure_retry_seconds=float(
+            os.getenv("YFINANCE_FAILURE_RETRY_SECONDS", "60")
+        ),
     )
-    metrics.record_cache("yfinance", "opaque_internal_cache")
     holdings = holdings_provider.get_holdings()
+    metrics.record_cache(
+        "ndx_holdings",
+        getattr(holdings_provider, "cache_status", "local_source_bypass"),
+    )
     metrics.checkpoint("ndx_holdings")
     source_failures = list(holdings_provider.failures)
     holdings_as_of = holdings_provider.holdings_as_of
-    selection_provider = NasdaqPublicUniverseProvider(
-        timeout=int(os.getenv("HTTP_TIMEOUT_SECONDS", "30")),
-        cache_path=os.getenv(
-            "NASDAQ_UNIVERSE_CACHE_PATH",
-            "data/nasdaq_public_universe_cache.csv",
-        ),
+    current_holdings_fingerprint = holdings_fingerprint(holdings)
+    selection_ttl_seconds = float(
+        os.getenv("NASDAQ_SELECTION_TTL_SECONDS", "86400")
     )
-    try:
-        selection = selection_provider.get_annual_selection(holdings)
-    except Exception as exc:
-        failure = f"Nasdaq rebalance universe: {type(exc).__name__}: {exc}"
-        source_failures.append(failure)
-        selection = fallback_current_selection(holdings, reason=failure)
+    cached_selection = provider_cache.get_selection(
+        universe,
+        current_holdings_fingerprint,
+        max_age_seconds=selection_ttl_seconds,
+    )
+    selection_refresh_needed = True
+    if cached_selection is not None and cached_selection.holdings_match:
+        selection = cached_selection.selection
+        selection_cache_status = (
+            "fresh_hit" if cached_selection.is_fresh else "stale_hit"
+        )
+        selection_refresh_needed = not cached_selection.is_fresh
+    else:
+        reason = (
+            "Cached annual selection does not match current holdings; "
+            "background refresh queued."
+            if cached_selection is not None
+            else "No cached annual selection; background refresh queued."
+        )
+        selection = fallback_current_selection(holdings, reason=reason)
+        selection_cache_status = (
+            "holdings_mismatch_current_fallback"
+            if cached_selection is not None
+            else "miss_current_fallback"
+        )
     metrics.record_cache(
-        "nasdaq_universe",
-        getattr(selection_provider, "cache_status", "not_observable"),
+        "nasdaq_selection",
+        selection_cache_status,
     )
     metrics.checkpoint("nasdaq_selection")
 
     combined_holdings = _combined_rebalance_holdings(holdings, selection.securities)
     market_data = market_provider.get_market_data(combined_holdings["ticker"].tolist())
+    metrics.record_cache(
+        "yfinance_market_data",
+        getattr(market_provider, "cache_status", "not_observable"),
+    )
     metrics.checkpoint("market_data")
     reference_data_as_of = None
     rebalance_reference: pd.DataFrame
     global_yfinance_fallback = False
+    base_acwi_provider = IsharesAcwiFloatWeightsProvider(
+        url=os.getenv("ACWI_HOLDINGS_URL", DEFAULT_ACWI_URL),
+        timeout=int(os.getenv("HTTP_TIMEOUT_SECONDS", "30")),
+    )
+    acwi_provider = CachedAcwiFloatWeightsProvider(
+        provider=base_acwi_provider,
+        cache=provider_cache,
+        cache_key=provider_cache_key("acwi-holdings", base_acwi_provider),
+        ttl_seconds=provider_holdings_ttl_seconds,
+    )
     if weighting_basis == "float":
-        acwi_provider = IsharesAcwiFloatWeightsProvider(
-            url=os.getenv("ACWI_HOLDINGS_URL", DEFAULT_ACWI_URL),
-            timeout=int(os.getenv("HTTP_TIMEOUT_SECONDS", "30")),
-        )
         try:
             references = acwi_provider.build_reference(combined_holdings, market_data)
         except Exception as exc:
@@ -306,10 +389,6 @@ def _recompute_snapshot(
         )
         market_data["reference_source"] = "yfinance_total_shares"
         market_source = market_provider.source_name
-        acwi_provider = IsharesAcwiFloatWeightsProvider(
-            url=os.getenv("ACWI_HOLDINGS_URL", DEFAULT_ACWI_URL),
-            timeout=int(os.getenv("HTTP_TIMEOUT_SECONDS", "30")),
-        )
         try:
             float_references = acwi_provider.build_reference(
                 combined_holdings, market_data
@@ -335,6 +414,10 @@ def _recompute_snapshot(
         rebalance_reference["counterfactual_reference_raw"] = (
             rebalance_reference["price"] * rebalance_reference["shares_outstanding"]
         )
+    metrics.record_cache(
+        "acwi_holdings",
+        acwi_provider.cache_status,
+    )
     metrics.checkpoint("reference_data")
     result = calculate_distortion(
         holdings,
@@ -372,8 +455,17 @@ def _recompute_snapshot(
         )
     metrics.checkpoint("annual_reconstitution")
     active_share: ActiveShareResult | None = None
+    base_spx_provider = build_spx_holdings_chain(universe)
+    spx_provider = CachedHoldingsProvider(
+        provider=base_spx_provider,
+        cache=provider_cache,
+        cache_key=provider_cache_key(
+            f"spx-holdings:{universe}",
+            base_spx_provider,
+        ),
+        ttl_seconds=provider_holdings_ttl_seconds,
+    )
     try:
-        spx_provider = build_spx_holdings_chain(universe)
         spx_holdings = spx_provider.get_holdings()
         source_failures.extend(spx_provider.failures)
         metrics.checkpoint("spx_holdings")
@@ -391,6 +483,10 @@ def _recompute_snapshot(
         source_failures.append(
             f"S&P 500 holdings comparison: {type(exc).__name__}: {exc}"
         )
+    metrics.record_cache(
+        "spx_holdings",
+        spx_provider.cache_status,
+    )
     metrics.checkpoint("active_share_calculation")
     holdings_source = holdings_provider.source_name
     reference_fund = holdings_provider.reference_fund
@@ -419,6 +515,30 @@ def _recompute_snapshot(
         total_ms,
         refresh_warn_seconds,
     )
+    background_refresh_queued = False
+    if (
+        selection_refresh_needed
+        and background_refresh
+        and _background_refresh_enabled()
+    ):
+        background_refresh_queued = _schedule_nasdaq_refresh(
+            db_path=database.path,
+            holdings=holdings,
+            holdings_csv=holdings_csv,
+            universe=universe,
+            weighting_basis=weighting_basis,
+            provider_cache_path=provider_cache_path,
+            holdings_fingerprint_value=current_holdings_fingerprint,
+        )
+        metrics.record_cache(
+            "nasdaq_background_refresh",
+            "queued" if background_refresh_queued else "already_running",
+        )
+    elif selection_refresh_needed:
+        metrics.record_cache(
+            "nasdaq_background_refresh",
+            "disabled",
+        )
     database.update_snapshot_observability(
         snapshot_id,
         performance_status=refresh_performance_status,
@@ -441,7 +561,115 @@ def _recompute_snapshot(
         performance_status=refresh_performance_status,
         timings_ms=dict(metrics.timings_ms),
         cache_statuses=dict(metrics.cache_statuses),
+        background_refresh_queued=background_refresh_queued,
     )
+
+
+def _background_refresh_enabled() -> bool:
+    return os.getenv("NDX_BACKGROUND_REFRESH_ENABLED", "1").strip().lower() not in {
+        "0",
+        "false",
+        "no",
+        "off",
+    }
+
+
+def _schedule_nasdaq_refresh(
+    *,
+    db_path: Path,
+    holdings: pd.DataFrame,
+    holdings_csv: str | Path | None,
+    universe: str,
+    weighting_basis: str,
+    provider_cache_path: str | Path,
+    holdings_fingerprint_value: str,
+) -> bool:
+    job_key = background_job_key(universe, weighting_basis)
+    holdings_copy = holdings.copy(deep=True)
+    return submit_unique(
+        job_key,
+        lambda: _run_nasdaq_refresh(
+            job_key=job_key,
+            db_path=db_path,
+            holdings=holdings_copy,
+            holdings_csv=holdings_csv,
+            universe=universe,
+            weighting_basis=weighting_basis,
+            provider_cache_path=provider_cache_path,
+            holdings_fingerprint_value=holdings_fingerprint_value,
+        ),
+    )
+
+
+def _run_nasdaq_refresh(
+    *,
+    job_key: str,
+    db_path: Path,
+    holdings: pd.DataFrame,
+    holdings_csv: str | Path | None,
+    universe: str,
+    weighting_basis: str,
+    provider_cache_path: str | Path,
+    holdings_fingerprint_value: str,
+) -> None:
+    cache = ProviderCache(provider_cache_path)
+    cache.set_job_status(job_key, "running")
+    try:
+        provider = NasdaqPublicUniverseProvider(
+            timeout=int(os.getenv("HTTP_TIMEOUT_SECONDS", "30")),
+            cache_path=os.getenv(
+                "NASDAQ_UNIVERSE_CACHE_PATH",
+                "data/nasdaq_public_universe_cache.csv",
+            ),
+            liquidity_cache_path=os.getenv(
+                "NASDAQ_LIQUIDITY_CACHE_PATH",
+                "data/nasdaq_liquidity_cache.csv",
+            ),
+            cache_ttl_seconds=float(
+                os.getenv("NASDAQ_SOURCE_CACHE_TTL_SECONDS", "86400")
+            ),
+        )
+        selection = provider.get_annual_selection(holdings)
+        cache.save_selection(
+            universe,
+            holdings_fingerprint_value,
+            selection,
+        )
+        outcome = recompute_snapshot(
+            db_path=db_path,
+            holdings_csv=holdings_csv,
+            universe=universe,
+            weighting_basis=weighting_basis,
+            background_refresh=False,
+        )
+        cache.set_job_status(
+            job_key,
+            "complete",
+            snapshot_id=outcome.snapshot_id,
+        )
+        LOGGER.info(
+            structured_event(
+                "nasdaq_background_refresh_complete",
+                job_key=job_key,
+                snapshot_id=outcome.snapshot_id,
+                universe_cache=provider.cache_status,
+                liquidity_cache=provider.liquidity_cache_status,
+            )
+        )
+    except Exception as exc:
+        cache.set_job_status(
+            job_key,
+            "failed",
+            error=f"{type(exc).__name__}: {exc}",
+        )
+        LOGGER.error(
+            structured_event(
+                "nasdaq_background_refresh_failed",
+                job_key=job_key,
+                error_type=type(exc).__name__,
+                error=str(exc),
+            )
+        )
 
 
 def recompute_all_snapshots(

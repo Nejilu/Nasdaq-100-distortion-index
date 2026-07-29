@@ -11,9 +11,9 @@ from typing import Any, Iterator
 
 import pandas as pd
 
-from active_share import ActiveShareResult
-from distortion_engine import DistortionResult
-from nasdaq100_rebalance import RebalanceResult
+from ndx_wdi.domain.active_share import ActiveShareResult
+from ndx_wdi.domain.distortion import DistortionResult
+from ndx_wdi.domain.rebalance import RebalanceResult
 
 
 SCHEMA = """
