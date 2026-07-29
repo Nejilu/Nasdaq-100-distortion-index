@@ -20,7 +20,8 @@ names absent from ACWI use a yfinance free-float fallback calibrated into the
 same ACWI fund-value units with the median ratio observed across matched names.
 The Nasdaq-listed `ASML` ADR is a maintained exception: its float is fixed at
 `88,000,000` ADRs because yfinance's consolidated value is not valid for that
-listing.
+listing. Its listed total share count is also fixed at `88,000,000`, preventing
+the annual modified-cap calculation from deriving an unsupported `3x` ratio.
 
 ```text
 fallback_scale = median(ACWI_market_value / yfinance_float_market_cap)
@@ -62,8 +63,9 @@ reallocated to move from one distribution to the other.
   defaults are `ARM`, `ASML`, and `PDD`; `NDX_ADR_TICKERS` can extend the list.
 - Prices, `floatShares`, `sharesOutstanding`, and `marketCap` come from
   `yfinance`. They support total capitalization, fallback weights, and fallback
-  consistency checks. The `ASML` ADR float overrides `floatShares` with
-  `88,000,000` and is persisted as `hardcoded_float_override`.
+  consistency checks. The `ASML` ADR overrides both `floatShares` and
+  `sharesOutstanding` with `88,000,000`; the float source is persisted as
+  `hardcoded_float_override`.
 - The internal yfinance SQLite cache is stored in `data/yfinance_cache` so the
   application remains usable when the Windows user cache is not writable.
 - An ACWI match does not require a yfinance price or float count. A missing or
@@ -71,12 +73,15 @@ reallocated to move from one distribution to the other.
 - A fallback float inconsistent with shares outstanding or total market
   capitalization is excluded without substitution.
 - The legacy all-yfinance method remains the global fallback if the ACWI
-  download cannot be validated.
+  download cannot be validated, but every fallback observation passes the same
+  float/share-count and float-cap/market-cap consistency checks.
 - `coverage_ratio` measures the published weight represented before exclusions.
   Covered published weights are then normalized to 100% so both distributions
   are compared over the same investable set.
 - `complete` means coverage is at least `NDX_COVERAGE_THRESHOLD` (99% by
-  default); lower coverage is reported as `partial_coverage`.
+  default); lower coverage is reported as `partial_coverage`. An all-yfinance
+  reference is explicitly reported as `degraded_fallback` or
+  `degraded_partial_coverage`, regardless of its nominal coverage.
 
 The ETF holdings remain proxies for the index, and free market-data sources are
 not official or guaranteed. Local history starts with the first saved snapshot.

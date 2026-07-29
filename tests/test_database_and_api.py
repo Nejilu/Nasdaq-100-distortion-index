@@ -275,6 +275,102 @@ def test_total_basis_is_persisted_and_queried_separately(tmp_path, live_sources)
     assert all(row["float_weight"] is None for row in components)
 
 
+def test_partial_wdi_coverage_does_not_change_published_active_share(
+    tmp_path,
+    monkeypatch,
+    live_sources,
+):
+    class PartialAcwiProvider(_LiveAcwiProvider):
+        def build_reference(self, holdings, market_data):
+            result = super().build_reference(holdings, market_data)
+            missing = result["ticker"].eq("C")
+            result.loc[missing, "reference_weight_raw"] = None
+            result.loc[missing, "reference_status"] = (
+                "missing_float_yfinance_fallback"
+            )
+            return result
+
+    class IdenticalSpxProvider(_LiveSpxHoldingsProvider):
+        def get_holdings(self):
+            return _LiveHoldingsProvider("non_ucits").get_holdings()
+
+    monkeypatch.setattr(
+        snapshot_service,
+        "IsharesAcwiFloatWeightsProvider",
+        PartialAcwiProvider,
+    )
+    monkeypatch.setattr(
+        snapshot_service,
+        "build_spx_holdings_chain",
+        lambda universe: IdenticalSpxProvider(universe),
+    )
+
+    outcome = recompute_snapshot(db_path=tmp_path / "partial-active-share.sqlite3")
+
+    assert outcome.result.snapshot_status == "partial_coverage"
+    assert outcome.active_share is not None
+    assert outcome.active_share.active_share == pytest.approx(0.0)
+
+
+def test_global_yfinance_fallback_rejects_inconsistent_float(
+    tmp_path,
+    monkeypatch,
+    live_sources,
+):
+    class FailingAcwiProvider(_LiveAcwiProvider):
+        def build_reference(self, holdings, market_data):
+            raise ValueError("ACWI unavailable")
+
+    class InconsistentMarketDataProvider(_LiveMarketDataProvider):
+        def get_market_data(self, tickers):
+            result = super().get_market_data(tickers)
+            bad = result["ticker"].eq("C")
+            result.loc[bad, "float_shares"] = 1_000.0
+            return result
+
+    monkeypatch.setattr(
+        snapshot_service,
+        "IsharesAcwiFloatWeightsProvider",
+        FailingAcwiProvider,
+    )
+    monkeypatch.setattr(
+        snapshot_service,
+        "YFinanceMarketDataProvider",
+        InconsistentMarketDataProvider,
+    )
+
+    outcome = recompute_snapshot(db_path=tmp_path / "invalid-fallback.sqlite3")
+    components = outcome.result.components.set_index("ticker")
+
+    assert outcome.market_data_source.endswith("_global_fallback")
+    assert outcome.result.snapshot_status == "degraded_partial_coverage"
+    assert outcome.result.invalid_float_count == 1
+    assert outcome.result.coverage_ratio == pytest.approx(0.8)
+    assert components.loc["C", "data_status"] == "invalid_yfinance_fallback"
+    assert pd.isna(components.loc["C", "counterfactual_weight"])
+
+
+def test_complete_global_yfinance_fallback_is_marked_degraded(
+    tmp_path,
+    monkeypatch,
+    live_sources,
+):
+    class FailingAcwiProvider(_LiveAcwiProvider):
+        def build_reference(self, holdings, market_data):
+            raise ValueError("ACWI unavailable")
+
+    monkeypatch.setattr(
+        snapshot_service,
+        "IsharesAcwiFloatWeightsProvider",
+        FailingAcwiProvider,
+    )
+
+    outcome = recompute_snapshot(db_path=tmp_path / "degraded-fallback.sqlite3")
+
+    assert outcome.result.coverage_ratio == pytest.approx(1.0)
+    assert outcome.result.snapshot_status == "degraded_fallback"
+
+
 def test_api_database_is_cached_per_configured_path(tmp_path, monkeypatch):
     first_path = tmp_path / "first.sqlite3"
     second_path = tmp_path / "second.sqlite3"

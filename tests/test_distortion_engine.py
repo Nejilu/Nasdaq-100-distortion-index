@@ -1,5 +1,6 @@
 import math
 import sys
+import time
 from types import SimpleNamespace
 
 import pandas as pd
@@ -8,6 +9,8 @@ from distortion_engine import calculate_distortion, normalize_actual_weights
 from market_data_provider import (
     FLOAT_SHARES_OVERRIDE_STATUS,
     FLOAT_SHARES_OVERRIDES,
+    TOTAL_SHARES_OVERRIDE_STATUS,
+    TOTAL_SHARES_OVERRIDES,
     YFinanceMarketDataProvider,
     _allocate_shared_float_shares,
     _normalize_market_data,
@@ -306,8 +309,63 @@ def test_asml_adr_float_override_replaces_yfinance_value(monkeypatch):
     result = provider.get_market_data(["ASML"]).set_index("ticker")
 
     assert FLOAT_SHARES_OVERRIDES["ASML"] == 88_000_000.0
+    assert TOTAL_SHARES_OVERRIDES["ASML"] == 88_000_000.0
     assert result.loc["ASML", "float_shares"] == 88_000_000.0
+    assert result.loc["ASML", "shares_outstanding"] == 88_000_000.0
     assert (
         result.loc["ASML", "float_shares_status"]
         == FLOAT_SHARES_OVERRIDE_STATUS
     )
+    assert (
+        result.loc["ASML", "shares_outstanding_status"]
+        == TOTAL_SHARES_OVERRIDE_STATUS
+    )
+
+
+def test_yfinance_market_data_batch_has_a_global_deadline(monkeypatch):
+    provider = YFinanceMarketDataProvider(
+        max_workers=1,
+        batch_timeout_seconds=0.01,
+    )
+    monkeypatch.setattr(provider, "_configure_cache", lambda: None)
+
+    def slow_fetch(ticker):
+        time.sleep(0.1)
+        return {"ticker": ticker}
+
+    monkeypatch.setattr(provider, "_fetch_one", slow_fetch)
+
+    started = time.monotonic()
+    result = provider.get_market_data(["SLOW"])
+    elapsed = time.monotonic() - started
+
+    assert elapsed < 0.08
+    assert result.loc[0, "ticker"] == "SLOW"
+    assert "deadline exceeded" in result.loc[0, "market_data_error"]
+
+
+def test_invalid_direct_fallback_status_is_excluded_even_with_positive_weight():
+    holdings = pd.DataFrame(
+        {
+            "ticker": ["A", "BAD"],
+            "actual_weight": [0.8, 0.2],
+        }
+    )
+    reference_data = pd.DataFrame(
+        {
+            "ticker": ["A", "BAD"],
+            "price": [10.0, 10.0],
+            "float_shares": [10.0, 1_000.0],
+            "shares_outstanding": [12.0, 20.0],
+            "reference_weight_raw": [100.0, 10_000.0],
+            "reference_source": ["ishares_acwi", "yfinance_fallback"],
+            "reference_status": ["valid_acwi", "invalid_yfinance_fallback"],
+        }
+    )
+
+    result = calculate_distortion(holdings, reference_data)
+    components = result.components.set_index("ticker")
+
+    assert math.isclose(result.coverage_ratio, 0.8)
+    assert result.invalid_float_count == 1
+    assert pd.isna(components.loc["BAD", "counterfactual_weight"])

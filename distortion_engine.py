@@ -7,6 +7,8 @@ from dataclasses import dataclass
 import numpy as np
 import pandas as pd
 
+from market_data_provider import evaluate_float_observations
+
 
 COMPONENT_COLUMNS = [
     "ticker",
@@ -96,23 +98,14 @@ def calculate_distortion(
         if column not in data:
             data[column] = default
 
-    missing_price = data["price"].isna() | (data["price"] <= 0)
-    missing_float = data["float_shares"].isna() | (data["float_shares"] <= 0)
-    has_outstanding = data["shares_outstanding"].notna() & (data["shares_outstanding"] > 0)
-    has_market_cap = data["market_cap"].notna() & (data["market_cap"] > 0)
-    implied_float_cap = data["price"] * data["float_shares"]
-    float_gt_outstanding = (
-        ~missing_float
-        & has_outstanding
-        & (data["float_shares"] > data["shares_outstanding"] * float_shares_tolerance)
+    float_quality = evaluate_float_observations(
+        data,
+        float_shares_tolerance=float_shares_tolerance,
+        float_cap_tolerance=float_cap_tolerance,
     )
-    float_cap_gt_market_cap = (
-        ~missing_price
-        & ~missing_float
-        & has_market_cap
-        & (implied_float_cap > data["market_cap"] * float_cap_tolerance)
-    )
-    invalid_float = float_gt_outstanding | float_cap_gt_market_cap
+    missing_price = ~float_quality["price_valid"]
+    missing_float = ~float_quality["float_valid"]
+    invalid_float = float_quality["inconsistent"]
     missing_outstanding = data["shares_outstanding"].isna() | (
         data["shares_outstanding"] <= 0
     )
@@ -133,7 +126,7 @@ def calculate_distortion(
         invalid_reference_shares = reference_status.eq(
             "invalid_yfinance_fallback"
         )
-        valid = ~missing_reference_shares
+        valid = ~(missing_reference_shares | invalid_reference_shares)
         reference_shares = pd.Series(np.nan, index=data.index)
         needs_yfinance_fallback = ~reference_status.eq("valid_acwi")
         missing_float_for_result = needs_yfinance_fallback & missing_float

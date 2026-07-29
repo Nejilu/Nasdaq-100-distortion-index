@@ -1,4 +1,4 @@
-# ASML anomaly in IQQ and CNDX snapshots
+# Historical ASML anomaly in IQQ and CNDX snapshots
 
 ## Technical summary
 
@@ -70,12 +70,13 @@ holdings. ACWI lists `ASML` on Euronext Amsterdam, while the Nasdaq-100 ETF
 position is explicitly an ADR. The two rows must not be treated as the same
 security for float purposes.
 
-`ASML`, `ARM`, and `PDD` are therefore labeled `ADR/ADS` and bypass ACWI. They
-use the calibrated yfinance fallback path. ASML remains excluded with
-`invalid_yfinance_fallback` because the inconsistency documented above is still
-present. This is explicit in each component's `security_type`,
-`reference_source`, and `data_status`.
+`ASML`, `ARM`, and `PDD` are therefore labeled `ADR/ADS` and bypass ACWI.
+`ARM` and `PDD` use the calibrated yfinance fallback path. ASML instead uses a
+manually maintained listing-specific override of `88,000,000` for both floating
+and total ADR shares. The two equal overrides prevent the annual modified-cap
+pipeline from deriving an unsupported `3x` float ratio.
 
-The remaining open data problem is a reliable ADR-specific float source. No
-primary-listing ACWI value or total shares-outstanding value is substituted
-automatically.
+The ASML values are explicit manual inputs rather than a live provider field.
+They are identified by `hardcoded_float_override` and
+`hardcoded_total_shares_override` so a future reliable ADR-specific source can
+replace them without changing the calculation rules.
