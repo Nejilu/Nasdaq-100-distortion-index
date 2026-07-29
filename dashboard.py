@@ -3226,9 +3226,12 @@ if recompute_clicked:
                 universe=universe,
                 weighting_basis=weighting_basis,
             )
-            elapsed_seconds = (outcome.timings_ms or {}).get("total", 0) / 1_000
+            timings_ms = getattr(outcome, "timings_ms", None) or {}
+            elapsed_ms = timings_ms.get("total")
             st.session_state["_refresh_notice"] = (
-                f"{universe_label} updated in {elapsed_seconds:.1f}s"
+                f"{universe_label} updated in {elapsed_ms / 1_000:.1f}s"
+                if elapsed_ms is not None
+                else f"{universe_label} updated"
             )
             st.rerun()
         except Exception as exc:
