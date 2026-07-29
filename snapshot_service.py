@@ -21,6 +21,7 @@ from distortion_engine import DistortionResult, calculate_distortion
 from market_data_provider import (
     FLOAT_SHARES_OVERRIDE_STATUS,
     YFinanceMarketDataProvider,
+    evaluate_float_observations,
 )
 from nasdaq100_rebalance import (
     NasdaqPublicUniverseProvider,
@@ -136,6 +137,9 @@ def recompute_snapshot(
     holdings_provider = build_holdings_chain(universe, holdings_csv=holdings_csv)
     market_provider = YFinanceMarketDataProvider(
         max_workers=int(os.getenv("YFINANCE_MAX_WORKERS", "8")),
+        batch_timeout_seconds=float(
+            os.getenv("YFINANCE_BATCH_TIMEOUT_SECONDS", "60")
+        ),
         cache_dir=os.getenv("YFINANCE_CACHE_DIR", "data/yfinance_cache"),
     )
     holdings = holdings_provider.get_holdings()
@@ -158,6 +162,7 @@ def recompute_snapshot(
     market_data = market_provider.get_market_data(combined_holdings["ticker"].tolist())
     reference_data_as_of = None
     rebalance_reference: pd.DataFrame
+    global_yfinance_fallback = False
     if weighting_basis == "float":
         acwi_provider = IsharesAcwiFloatWeightsProvider(
             url=os.getenv("ACWI_HOLDINGS_URL", DEFAULT_ACWI_URL),
@@ -166,6 +171,7 @@ def recompute_snapshot(
         try:
             references = acwi_provider.build_reference(combined_holdings, market_data)
         except Exception as exc:
+            global_yfinance_fallback = True
             source_failures.append(
                 f"{acwi_provider.source_name}: {type(exc).__name__}: {exc}"
             )
@@ -174,20 +180,34 @@ def recompute_snapshot(
                 on="ticker",
                 how="left",
             )
-            market_data["reference_weight_raw"] = (
-                market_data["price"] * market_data["float_shares"]
-            )
+            float_quality = evaluate_float_observations(market_data)
+            market_data["reference_weight_raw"] = float_quality[
+                "float_cap"
+            ].where(float_quality["valid"])
             market_data["reference_source"] = "yfinance_fallback"
-            market_data["reference_status"] = np.where(
-                market_data["reference_weight_raw"].gt(0),
-                "valid_yfinance_fallback",
-                "missing_float_yfinance_fallback",
+            market_data["reference_status"] = np.select(
+                [
+                    float_quality["valid"],
+                    float_quality["inconsistent"],
+                    ~float_quality["float_valid"],
+                    ~float_quality["price_valid"],
+                ],
+                [
+                    "valid_yfinance_fallback",
+                    "invalid_yfinance_fallback",
+                    "missing_float_yfinance_fallback",
+                    "missing_price_yfinance_fallback",
+                ],
+                default="invalid_yfinance_fallback",
             )
             hardcoded_override = (
-                market_data["float_shares_status"]
+                market_data.get(
+                    "float_shares_status",
+                    pd.Series(None, index=market_data.index),
+                )
                 .astype("string")
                 .eq(FLOAT_SHARES_OVERRIDE_STATUS)
-                & market_data["reference_weight_raw"].gt(0)
+                & float_quality["valid"]
             )
             market_data.loc[
                 hardcoded_override, "reference_source"
@@ -257,6 +277,13 @@ def recompute_snapshot(
         coverage_threshold=coverage_threshold,
         weighting_basis=weighting_basis,
     )
+    if global_yfinance_fallback:
+        fallback_status = (
+            "degraded_fallback"
+            if result.coverage_ratio >= coverage_threshold
+            else "degraded_partial_coverage"
+        )
+        result = replace(result, snapshot_status=fallback_status)
     rebalance: RebalanceResult | None = None
     try:
         rebalance = simulate_rebalance(
@@ -283,7 +310,10 @@ def recompute_snapshot(
         spx_holdings = spx_provider.get_holdings()
         source_failures.extend(spx_provider.failures)
         active_share = calculate_active_share(
-            result.components,
+            _build_active_share_ndx_holdings(
+                holdings,
+                rebalance.components if rebalance is not None else None,
+            ),
             spx_holdings,
             spx_reference_fund=spx_provider.reference_fund,
             spx_holdings_source=spx_provider.source_name,
@@ -507,3 +537,36 @@ def _merge_rebalance_components(
     result["actual_weight"] = result["actual_weight"].fillna(0.0)
     result["data_status"] = result["data_status"].fillna("rebalance_addition")
     return result
+
+
+def _build_active_share_ndx_holdings(
+    holdings: pd.DataFrame,
+    rebalance_components: pd.DataFrame | None,
+) -> pd.DataFrame:
+    """Keep published ETF weights separate from WDI coverage normalization."""
+    current = holdings[["ticker", "company_name", "actual_weight"]].copy()
+    current["ticker"] = current["ticker"].astype("string").str.upper().str.strip()
+    if (
+        rebalance_components is None
+        or "rebalance_weight" not in rebalance_components
+    ):
+        return current
+
+    rebalanced = rebalance_components[
+        ["ticker", "company_name", "rebalance_weight"]
+    ].copy()
+    rebalanced["ticker"] = (
+        rebalanced["ticker"].astype("string").str.upper().str.strip()
+    )
+    result = current.merge(
+        rebalanced,
+        on="ticker",
+        how="outer",
+        suffixes=("_current", "_rebalanced"),
+    )
+    result["company_name"] = result["company_name_current"].fillna(
+        result["company_name_rebalanced"]
+    )
+    return result[
+        ["ticker", "company_name", "actual_weight", "rebalance_weight"]
+    ]

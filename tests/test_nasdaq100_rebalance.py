@@ -1,9 +1,16 @@
 import math
+import sys
+import time
+from datetime import date
+from types import SimpleNamespace
 
 import pandas as pd
+import pytest
 
 from nasdaq100_rebalance import (
+    NasdaqPublicUniverseProvider,
     SelectionResult,
+    _require_known_liquidity,
     apply_annual_security_capping,
     apply_company_capping,
     derive_acwi_total_cap_conversion,
@@ -152,6 +159,39 @@ def test_annual_universe_returns_exactly_100_companies():
     assert not result.removals
 
 
+def test_unknown_liquidity_aborts_selection_instead_of_excluding_security():
+    universe = pd.DataFrame(
+        {
+            "ticker": ["KNOWN", "UNKNOWN"],
+            "advt_3m": [10_000_000.0, None],
+            "liquidity_status": ["available", "unknown"],
+        }
+    )
+
+    with pytest.raises(ValueError, match="UNKNOWN"):
+        _require_known_liquidity(universe, ["KNOWN", "UNKNOWN"])
+
+
+def test_liquidity_download_has_a_global_deadline(monkeypatch):
+    def slow_download(**_kwargs):
+        time.sleep(0.1)
+        return pd.DataFrame()
+
+    monkeypatch.setitem(
+        sys.modules,
+        "yfinance",
+        SimpleNamespace(download=slow_download),
+    )
+    provider = NasdaqPublicUniverseProvider(timeout=0.01)
+
+    started = time.monotonic()
+    with pytest.raises(TimeoutError, match="deadline exceeded"):
+        provider._download_liquidity(["SLOW"], as_of=date(2026, 7, 29))
+    elapsed = time.monotonic() - started
+
+    assert elapsed < 0.08
+
+
 def test_rebalance_uses_modified_cap_ratio_and_calculates_new_wdi():
     tickers = ["A"] + [f"S{i}" for i in range(25)]
     holdings = pd.DataFrame(
@@ -204,6 +244,59 @@ def test_rebalance_uses_modified_cap_ratio_and_calculates_new_wdi():
     assert components.loc["A", "rebalance_weight"] == 0.14
     assert result.method == "annual_modified_market_cap_2026"
     assert result.ndx_wdi > 0
+
+
+def test_asml_override_keeps_annual_modified_cap_ratio_at_one():
+    tickers = ["ASML"] + [f"S{i}" for i in range(25)]
+    holdings = pd.DataFrame(
+        {
+            "ticker": tickers,
+            "company_name": tickers,
+            "actual_weight": [1.0 / len(tickers)] * len(tickers),
+        }
+    )
+    securities = pd.DataFrame(
+        {
+            "ticker": tickers,
+            "company_name": tickers,
+            "company_id": tickers,
+            "security_type": ["ADR/ADS"] + ["Ordinary share"] * 25,
+            "is_current": [True] * len(tickers),
+            "selected": [True] * len(tickers),
+        }
+    )
+    selection = SelectionResult(
+        securities=securities,
+        selected_tickers=tuple(tickers),
+        selected_company_ids=tuple(tickers),
+        additions=(),
+        removals=(),
+        status="test",
+        source="test",
+        as_of="2026-07-29",
+        eligible_company_count=len(tickers),
+    )
+    reference = pd.DataFrame(
+        {
+            "ticker": tickers,
+            "reference_source": ["hardcoded_float_override"] + [None] * 25,
+            "reference_weight_raw": [88.0] + [1.0] * 25,
+            "float_shares": [88_000_000.0] + [1.0] * 25,
+            "shares_outstanding": [88_000_000.0] + [1.0] * 25,
+            "price": [1.0] * len(tickers),
+        }
+    )
+
+    result = simulate_rebalance(
+        holdings,
+        reference,
+        selection,
+        rebalance_type="annual",
+    )
+    asml = result.components.set_index("ticker").loc["ASML"]
+
+    assert asml["modified_cap_ratio"] == 1.0
+    assert asml["rebalance_input_status"] == "valid_hardcoded_float_override"
 
 
 def test_quarterly_rebalance_does_not_recap_when_current_constraints_pass():

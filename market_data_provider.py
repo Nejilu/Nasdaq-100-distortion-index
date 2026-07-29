@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, wait
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol, Sequence
@@ -16,6 +16,12 @@ FLOAT_SHARES_OVERRIDES = {
     "ASML": 88_000_000.0,
 }
 FLOAT_SHARES_OVERRIDE_STATUS = "hardcoded_float_override"
+TOTAL_SHARES_OVERRIDES = {
+    # The Nasdaq listing uses the same maintained ASML ADR share count. Keeping
+    # total and floating shares aligned prevents an unsupported automatic 3x.
+    "ASML": 88_000_000.0,
+}
+TOTAL_SHARES_OVERRIDE_STATUS = "hardcoded_total_shares_override"
 
 
 class MarketDataProvider(Protocol):
@@ -32,6 +38,7 @@ class YFinanceMarketDataProvider:
     """Retrieve current price and share counts from yfinance."""
 
     max_workers: int = 8
+    batch_timeout_seconds: float = 60.0
     cache_dir: str | Path = "data/yfinance_cache"
     source_name: str = "yfinance"
 
@@ -66,28 +73,32 @@ class YFinanceMarketDataProvider:
         unique_tickers = list(dict.fromkeys(str(ticker).upper() for ticker in tickers))
         rows: list[dict[str, object]] = []
         worker_count = max(1, min(int(self.max_workers), max(len(unique_tickers), 1)))
-        with ThreadPoolExecutor(max_workers=worker_count) as executor:
+        executor = ThreadPoolExecutor(max_workers=worker_count)
+        try:
             futures = {executor.submit(self._fetch_one, ticker): ticker for ticker in unique_tickers}
-            for future in as_completed(futures):
+            completed, pending = wait(
+                futures,
+                timeout=max(float(self.batch_timeout_seconds), 0.01),
+            )
+            for future in completed:
                 ticker = futures[future]
                 try:
                     rows.append(future.result())
                 except Exception as exc:  # one bad ticker must not invalidate the snapshot
-                    rows.append(
-                        {
-                            "ticker": ticker,
-                            "price": None,
-                            "float_shares": None,
-                            "shares_outstanding": None,
-                            "market_cap": None,
-                            "float_shares_status": None,
-                            "market_data_error": str(exc),
-                        }
+                    rows.append(_missing_market_data_row(ticker, str(exc)))
+            for future in pending:
+                ticker = futures[future]
+                future.cancel()
+                rows.append(
+                    _missing_market_data_row(
+                        ticker,
+                        "yfinance batch deadline exceeded",
                     )
-        normalized = _allocate_shared_float_shares(
-            _normalize_market_data(pd.DataFrame(rows))
-        )
-        return _apply_float_share_overrides(normalized)
+                )
+        finally:
+            executor.shutdown(wait=False, cancel_futures=True)
+        normalized = _allocate_shared_float_shares(_normalize_market_data(pd.DataFrame(rows)))
+        return _apply_share_overrides(normalized)
 
 
 def _normalize_market_data(frame: pd.DataFrame) -> pd.DataFrame:
@@ -98,6 +109,7 @@ def _normalize_market_data(frame: pd.DataFrame) -> pd.DataFrame:
         "shares_outstanding",
         "market_cap",
         "float_shares_status",
+        "shares_outstanding_status",
         "market_data_error",
     ]
     for column in expected:
@@ -155,3 +167,77 @@ def _apply_float_share_overrides(frame: pd.DataFrame) -> pd.DataFrame:
             FLOAT_SHARES_OVERRIDE_STATUS
         )
     return result
+
+
+def _apply_share_overrides(frame: pd.DataFrame) -> pd.DataFrame:
+    result = _apply_float_share_overrides(frame)
+    for ticker, shares_outstanding in TOTAL_SHARES_OVERRIDES.items():
+        matches = result["ticker"].eq(ticker)
+        result.loc[matches, "shares_outstanding"] = shares_outstanding
+        result.loc[matches, "shares_outstanding_status"] = (
+            TOTAL_SHARES_OVERRIDE_STATUS
+        )
+    return result
+
+
+def evaluate_float_observations(
+    frame: pd.DataFrame,
+    *,
+    float_shares_tolerance: float = 1.10,
+    float_cap_tolerance: float = 1.25,
+) -> pd.DataFrame:
+    """Return common validity masks for every float-based provider path."""
+    data = frame.copy()
+    for column in ["price", "float_shares", "shares_outstanding", "market_cap"]:
+        if column not in data:
+            data[column] = pd.NA
+        data[column] = pd.to_numeric(data[column], errors="coerce")
+
+    quality = pd.DataFrame(index=data.index)
+    quality["price_valid"] = data["price"].notna() & data["price"].gt(0)
+    quality["float_valid"] = (
+        data["float_shares"].notna() & data["float_shares"].gt(0)
+    )
+    quality["outstanding_valid"] = (
+        data["shares_outstanding"].notna()
+        & data["shares_outstanding"].gt(0)
+    )
+    quality["market_cap_valid"] = (
+        data["market_cap"].notna() & data["market_cap"].gt(0)
+    )
+    quality["float_cap"] = data["price"] * data["float_shares"]
+    quality["inconsistent"] = (
+        quality["float_valid"]
+        & quality["outstanding_valid"]
+        & (
+            data["float_shares"]
+            > data["shares_outstanding"] * float_shares_tolerance
+        )
+    ) | (
+        quality["price_valid"]
+        & quality["float_valid"]
+        & quality["market_cap_valid"]
+        & (
+            quality["float_cap"]
+            > data["market_cap"] * float_cap_tolerance
+        )
+    )
+    quality["valid"] = (
+        quality["price_valid"]
+        & quality["float_valid"]
+        & ~quality["inconsistent"]
+    )
+    return quality
+
+
+def _missing_market_data_row(ticker: str, error: str) -> dict[str, object]:
+    return {
+        "ticker": ticker,
+        "price": None,
+        "float_shares": None,
+        "shares_outstanding": None,
+        "market_cap": None,
+        "float_shares_status": None,
+        "shares_outstanding_status": None,
+        "market_data_error": error,
+    }

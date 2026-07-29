@@ -12,6 +12,10 @@ from __future__ import annotations
 import os
 import re
 import time
+from concurrent.futures import (
+    ThreadPoolExecutor,
+    TimeoutError as FuturesTimeoutError,
+)
 from dataclasses import dataclass
 from datetime import date
 from io import StringIO
@@ -144,6 +148,7 @@ class NasdaqPublicUniverseProvider:
             as_of=as_of,
         )
         universe = universe.merge(liquidity, on="ticker", how="left")
+        _require_known_liquidity(universe, candidates["ticker"])
 
         current = universe["is_current"]
         liquid = universe["advt_3m"].ge(5_000_000)
@@ -258,6 +263,7 @@ class NasdaqPublicUniverseProvider:
             as_of=as_of,
         )
         universe = universe.merge(liquidity, on="ticker", how="left")
+        _require_known_liquidity(universe, candidate_securities)
 
         current = universe["is_current"]
         liquid = universe["advt_3m"].ge(5_000_000)
@@ -462,25 +468,48 @@ class NasdaqPublicUniverseProvider:
         result.to_csv(cache_path, index=False)
         return result
 
-    @staticmethod
-    def _download_liquidity(tickers: list[str], *, as_of: date) -> pd.DataFrame:
+    def _download_liquidity(
+        self,
+        tickers: list[str],
+        *,
+        as_of: date,
+    ) -> pd.DataFrame:
         if not tickers:
             return pd.DataFrame(
-                columns=["ticker", "advt_3m", "first_trade_date", "trading_days"]
+                columns=[
+                    "ticker",
+                    "advt_3m",
+                    "first_trade_date",
+                    "trading_days",
+                    "liquidity_status",
+                ]
             )
         import yfinance as yf
 
+        tickers = list(dict.fromkeys(tickers))
         start = pd.Timestamp(as_of) - pd.DateOffset(months=5)
         end = pd.Timestamp(as_of) + pd.Timedelta(days=1)
-        history = yf.download(
+        executor = ThreadPoolExecutor(max_workers=1)
+        future = executor.submit(
+            yf.download,
             tickers=tickers,
             start=start.date().isoformat(),
             end=end.date().isoformat(),
             auto_adjust=False,
             progress=False,
-            threads=True,
+            threads=min(8, len(tickers)),
             group_by="column",
+            timeout=max(1, min(int(self.timeout), 30)),
         )
+        try:
+            history = future.result(timeout=max(float(self.timeout), 0.01))
+        except FuturesTimeoutError as exc:
+            future.cancel()
+            raise TimeoutError(
+                f"yfinance liquidity deadline exceeded after {self.timeout}s"
+            ) from exc
+        finally:
+            executor.shutdown(wait=future.done(), cancel_futures=True)
         rows: list[dict[str, object]] = []
         cutoff = pd.Timestamp(as_of) - pd.DateOffset(months=3)
         for ticker in tickers:
@@ -514,9 +543,48 @@ class NasdaqPublicUniverseProvider:
                         else None
                     ),
                     "trading_days": int(len(valid)),
+                    "liquidity_status": (
+                        "available" if not recent.empty else "unknown"
+                    ),
                 }
             )
         return pd.DataFrame(rows)
+
+
+def _require_known_liquidity(
+    universe: pd.DataFrame,
+    candidate_tickers: Iterable[str],
+) -> None:
+    """Abort selection instead of treating missing provider data as a failed rule."""
+    requested = {
+        str(ticker).upper().strip()
+        for ticker in candidate_tickers
+        if str(ticker).strip()
+    }
+    status = universe.get(
+        "liquidity_status",
+        pd.Series("unknown", index=universe.index),
+    ).astype("string")
+    advt = pd.to_numeric(
+        universe.get("advt_3m", pd.Series(np.nan, index=universe.index)),
+        errors="coerce",
+    )
+    observed = set(
+        universe.loc[
+            universe["ticker"].isin(requested)
+            & status.eq("available")
+            & advt.notna(),
+            "ticker",
+        ].astype(str)
+    )
+    unknown = sorted(requested.difference(observed))
+    if unknown:
+        preview = ", ".join(unknown[:10])
+        suffix = "" if len(unknown) <= 10 else f", and {len(unknown) - 10} more"
+        raise ValueError(
+            "Liquidity eligibility is unknown for "
+            f"{len(unknown)} candidate securities: {preview}{suffix}."
+        )
 
 
 def fallback_current_selection(

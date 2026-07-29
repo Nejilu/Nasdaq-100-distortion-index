@@ -13,6 +13,7 @@ import streamlit as st
 from dotenv import load_dotenv
 
 from active_share import calculate_active_share_sleeves
+from dashboard_chart_data import prepare_constituent_weight_comparison
 from database import SnapshotDatabase
 from rebalance_analytics import (
     AnnualRebalanceAnalysis,
@@ -813,8 +814,13 @@ def _render_rebalance_controls(snapshot: dict[str, object]) -> bool:
 
 
 def _render_source_status(snapshot: dict[str, object]) -> None:
-    is_complete = snapshot["status"] == "complete"
-    status_label = "Complete live snapshot" if is_complete else "Partial live snapshot"
+    status = str(snapshot["status"])
+    is_complete = status == "complete"
+    status_label = {
+        "complete": "Complete live snapshot",
+        "degraded_fallback": "Degraded live snapshot",
+        "degraded_partial_coverage": "Degraded partial snapshot",
+    }.get(status, "Partial live snapshot")
     dot_class = "" if is_complete else " partial"
     source_line = (
         f"{status_label} | {snapshot.get('reference_fund') or 'No reference fund'} "
@@ -1608,6 +1614,172 @@ def _render_weight_difference_chart(
         yaxis={"title": None, "showgrid": False},
     )
     st.plotly_chart(figure, width="stretch", config={"displayModeBar": False})
+
+
+def _render_constituent_weight_comparison(
+    components: pd.DataFrame,
+    weighting_basis: str,
+    *,
+    rebalanced_view: bool = False,
+) -> None:
+    st.html('<div class="ndx-section-rule"></div>')
+    header_columns = st.columns([4.3, 1], gap="large", vertical_alignment="bottom")
+    with header_columns[0]:
+        st.subheader(
+            (
+                "Annual NDX constituent weights vs counterfactual"
+                if rebalanced_view
+                else "Current NDX constituent weights vs counterfactual"
+            )
+        )
+        reference_label = (
+            "total-capitalization"
+            if weighting_basis == "total"
+            else "free-float"
+        )
+        st.caption(
+            "Solid bars show NDX weights. A lighter extension is the NDX "
+            f"excess; an outlined empty extension is the gap to the "
+            f"{reference_label} counterfactual."
+        )
+    with header_columns[1]:
+        displayed_count = st.selectbox(
+            "Constituents shown",
+            options=[15, 25, 50],
+            index=0,
+            format_func=lambda value: f"Top {value}",
+            key=(
+                "constituent_weight_count_"
+                f"{weighting_basis}_{'annual' if rebalanced_view else 'current'}"
+            ),
+        )
+
+    chart = prepare_constituent_weight_comparison(
+        components,
+        limit=int(displayed_count),
+    )
+    if chart.empty:
+        st.info("No valid constituent weights are available for comparison.")
+        return
+
+    main_color = "#4f91ad" if IS_DARK_MODE else "#326d87"
+    excess_color = "#91c1d2" if IS_DARK_MODE else "#8bb9cb"
+    empty_line_color = "#74838d" if IS_DARK_MODE else "#9aa7b1"
+    custom_data = chart[
+        [
+            "company_name",
+            "actual_weight",
+            "counterfactual_weight",
+            "weight_delta",
+        ]
+    ].to_numpy()
+    hovertemplate = (
+        "<b>%{y}</b><br>"
+        "%{customdata[0]}<br>"
+        "NDX weight: %{customdata[1]:.2%}<br>"
+        "Counterfactual: %{customdata[2]:.2%}<br>"
+        "Difference: %{customdata[3]:+.2%}"
+        "<extra></extra>"
+    )
+    figure = go.Figure()
+    figure.add_trace(
+        go.Bar(
+            x=chart["shared_weight"],
+            y=chart["ticker"],
+            orientation="h",
+            name="Current NDX weight",
+            marker={"color": main_color, "line": {"width": 0}},
+            text=chart["counterfactual_label_in_shared"],
+            textposition="inside",
+            insidetextanchor="end",
+            textangle=0,
+            constraintext="inside",
+            textfont={"color": "#f7fbfd", "size": 10},
+            customdata=custom_data,
+            hovertemplate=hovertemplate,
+        )
+    )
+    figure.add_trace(
+        go.Bar(
+            x=chart["actual_excess"],
+            y=chart["ticker"],
+            orientation="h",
+            name="NDX excess",
+            marker={"color": excess_color, "line": {"width": 0}},
+            customdata=custom_data,
+            hovertemplate=hovertemplate,
+        )
+    )
+    figure.add_trace(
+        go.Bar(
+            x=chart["counterfactual_gap"],
+            y=chart["ticker"],
+            orientation="h",
+            name="Gap to counterfactual",
+            marker={
+                "color": "rgba(0,0,0,0)",
+                "line": {"color": empty_line_color, "width": 1.4},
+            },
+            text=chart["counterfactual_label_in_gap"],
+            textposition="inside",
+            insidetextanchor="end",
+            textangle=0,
+            constraintext="inside",
+            textfont={"color": THEME["chart_font"], "size": 10},
+            customdata=custom_data,
+            hovertemplate=hovertemplate,
+        )
+    )
+    label_offset = max(float(chart["display_weight"].max()) * 0.012, 0.00008)
+    figure.add_trace(
+        go.Scatter(
+            x=chart["display_weight"] + label_offset,
+            y=chart["ticker"],
+            mode="text",
+            text=chart["actual_weight"].map(lambda value: f"NDX {value:.2%}"),
+            textposition="middle right",
+            textfont={"color": main_color, "size": 10},
+            cliponaxis=False,
+            hoverinfo="skip",
+            showlegend=False,
+        )
+    )
+    maximum_weight = float(chart["display_weight"].max())
+    figure.update_layout(
+        template="plotly_dark" if IS_DARK_MODE else "plotly_white",
+        height=max(500, 27 * len(chart) + 110),
+        margin={"l": 8, "r": 20, "t": 18, "b": 35},
+        barmode="stack",
+        bargap=0.24,
+        barcornerradius=5,
+        uniformtext_minsize=8,
+        uniformtext_mode="hide",
+        legend={
+            "orientation": "h",
+            "yanchor": "bottom",
+            "y": 1.01,
+            "xanchor": "left",
+            "x": 0,
+            "traceorder": "normal",
+            "font": {"color": THEME["chart_font"], "size": 10},
+        },
+        paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor="rgba(0,0,0,0)",
+        font={"color": THEME["chart_font"], "size": 11},
+        xaxis={
+            "title": None,
+            "tickformat": ".1%",
+            "gridcolor": THEME["chart_grid"],
+            "zeroline": False,
+            "range": [0, max(maximum_weight * 1.30, 0.01)],
+        },
+        yaxis={"title": None, "showgrid": False},
+    )
+    st.plotly_chart(
+        figure,
+        width="stretch",
+        config={"displayModeBar": False},
+    )
 
 
 def _render_annual_reconstitution_summary(
@@ -3114,6 +3286,12 @@ else:
             display_components,
             rebalanced_view=show_rebalanced,
         )
+
+    _render_constituent_weight_comparison(
+        display_components,
+        weighting_basis,
+        rebalanced_view=show_rebalanced,
+    )
 
     if show_rebalanced:
         _render_rebalance_changes_chart(components)

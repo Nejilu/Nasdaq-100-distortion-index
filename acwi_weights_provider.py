@@ -13,7 +13,10 @@ import numpy as np
 import pandas as pd
 import requests
 
-from market_data_provider import FLOAT_SHARES_OVERRIDE_STATUS
+from market_data_provider import (
+    FLOAT_SHARES_OVERRIDE_STATUS,
+    evaluate_float_observations,
+)
 
 
 DEFAULT_ACWI_URL = (
@@ -276,12 +279,9 @@ def add_yfinance_fallbacks(
             data[column] = np.nan
         data[column] = pd.to_numeric(data[column], errors="coerce")
 
-    price_valid = data["price"].notna() & (data["price"] > 0)
-    float_valid = data["float_shares"].notna() & (data["float_shares"] > 0)
-    outstanding_valid = (
-        data["shares_outstanding"].notna() & (data["shares_outstanding"] > 0)
-    )
-    market_cap_valid = data["market_cap"].notna() & (data["market_cap"] > 0)
+    quality = evaluate_float_observations(data)
+    price_valid = quality["price_valid"]
+    float_valid = quality["float_valid"]
     float_share_status = data.get(
         "float_shares_status",
         pd.Series(None, index=data.index),
@@ -289,21 +289,9 @@ def add_yfinance_fallbacks(
     hardcoded_override = float_share_status.eq(
         FLOAT_SHARES_OVERRIDE_STATUS
     ).fillna(False)
-    float_cap = data["price"] * data["float_shares"]
-    inconsistent = (
-        (
-            float_valid
-            & outstanding_valid
-            & (data["float_shares"] > data["shares_outstanding"] * 1.10)
-        )
-        | (
-            price_valid
-            & float_valid
-            & market_cap_valid
-            & (float_cap > data["market_cap"] * 1.25)
-        )
-    )
-    yfinance_valid = price_valid & float_valid & ~inconsistent
+    float_cap = quality["float_cap"]
+    inconsistent = quality["inconsistent"]
+    yfinance_valid = quality["valid"]
 
     direct = data["reference_source"].eq("ishares_acwi")
     calibration = direct & yfinance_valid
