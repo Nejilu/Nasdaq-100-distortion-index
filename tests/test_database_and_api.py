@@ -1,3 +1,6 @@
+import os
+from types import SimpleNamespace
+
 import pandas as pd
 import pytest
 from fastapi.testclient import TestClient
@@ -6,6 +9,7 @@ import snapshot_service
 from api import _database_for_path, app, get_database
 from database import SnapshotDatabase
 from nasdaq100_rebalance import fallback_current_selection
+from provider_cache import ProviderCache, holdings_fingerprint
 from snapshot_service import recompute_all_snapshots, recompute_snapshot
 
 
@@ -34,6 +38,7 @@ class _LiveHoldingsProvider:
 
 class _LiveMarketDataProvider:
     source_name = "test_live_market_data"
+    cache_status = "fixture_hit"
 
     def __init__(self, **_: object) -> None:
         pass
@@ -75,6 +80,24 @@ class _LiveAcwiProvider:
         )
 
 
+class _CachedLiveAcwiProvider:
+    cache_status = "fixture_hit"
+
+    def __init__(self, provider, **_: object) -> None:
+        self.provider = provider
+
+    @property
+    def source_name(self):
+        return self.provider.source_name
+
+    @property
+    def holdings_as_of(self):
+        return self.provider.holdings_as_of
+
+    def build_reference(self, holdings, market_data):
+        return self.provider.build_reference(holdings, market_data)
+
+
 class _LiveNasdaqUniverseProvider:
     cache_status = "fixture_hit"
 
@@ -106,7 +129,12 @@ class _LiveSpxHoldingsProvider:
 
 
 @pytest.fixture
-def live_sources(monkeypatch):
+def live_sources(monkeypatch, tmp_path):
+    monkeypatch.setenv(
+        "NDX_PROVIDER_CACHE_PATH",
+        str(tmp_path / "provider-cache.sqlite3"),
+    )
+    monkeypatch.setenv("NDX_BACKGROUND_REFRESH_ENABLED", "0")
     monkeypatch.setattr(
         snapshot_service,
         "build_holdings_chain",
@@ -117,6 +145,11 @@ def live_sources(monkeypatch):
     )
     monkeypatch.setattr(
         snapshot_service, "IsharesAcwiFloatWeightsProvider", _LiveAcwiProvider
+    )
+    monkeypatch.setattr(
+        snapshot_service,
+        "CachedAcwiFloatWeightsProvider",
+        _CachedLiveAcwiProvider,
     )
     monkeypatch.setattr(
         snapshot_service, "NasdaqPublicUniverseProvider", _LiveNasdaqUniverseProvider
@@ -149,8 +182,12 @@ def test_live_snapshot_roundtrip(tmp_path, live_sources):
     assert current["timings_ms"]["total"] >= 0
     assert current["timings_ms"]["database_persist"] >= 0
     assert current["cache_statuses"] == {
-        "nasdaq_universe": "fixture_hit",
-        "yfinance": "opaque_internal_cache",
+        "acwi_holdings": "fixture_hit",
+        "ndx_holdings": "miss_network_refresh",
+        "nasdaq_background_refresh": "disabled",
+        "nasdaq_selection": "miss_current_fallback",
+        "spx_holdings": "miss_network_refresh",
+        "yfinance_market_data": "fixture_hit",
     }
     assert outcome.timings_ms == current["timings_ms"]
     assert current["rebalance_ndx_wdi"] is not None
@@ -162,6 +199,120 @@ def test_live_snapshot_roundtrip(tmp_path, live_sources):
     assert active_share["spx_reference_fund"] == "IVV"
     assert active_share["active_share"] > 0
     assert {row["ticker"] for row in active_components} == {"A", "B", "C", "D"}
+
+
+def test_snapshot_queues_nasdaq_refresh_without_waiting(
+    tmp_path,
+    monkeypatch,
+    live_sources,
+):
+    monkeypatch.setenv("NDX_BACKGROUND_REFRESH_ENABLED", "1")
+    scheduled = []
+    monkeypatch.setattr(
+        snapshot_service,
+        "_schedule_nasdaq_refresh",
+        lambda **kwargs: scheduled.append(kwargs) or True,
+    )
+
+    outcome = recompute_snapshot(db_path=tmp_path / "queued.sqlite3")
+
+    assert outcome.background_refresh_queued
+    assert len(scheduled) == 1
+    assert outcome.cache_statuses["nasdaq_selection"] == (
+        "miss_current_fallback"
+    )
+    assert outcome.cache_statuses["nasdaq_background_refresh"] == "queued"
+
+
+def test_fresh_cached_selection_skips_background_refresh(
+    tmp_path,
+    monkeypatch,
+    live_sources,
+):
+    cache_path = os.environ["NDX_PROVIDER_CACHE_PATH"]
+    holdings = _LiveHoldingsProvider("non_ucits").get_holdings()
+    selection = fallback_current_selection(
+        holdings,
+        reason="Fresh cached selection.",
+    )
+    ProviderCache(cache_path).save_selection(
+        "non_ucits",
+        holdings_fingerprint(holdings),
+        selection,
+    )
+    monkeypatch.setenv("NDX_BACKGROUND_REFRESH_ENABLED", "1")
+    monkeypatch.setattr(
+        snapshot_service,
+        "_schedule_nasdaq_refresh",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            AssertionError("fresh selection must not queue a refresh")
+        ),
+    )
+
+    outcome = recompute_snapshot(db_path=tmp_path / "fresh.sqlite3")
+
+    assert not outcome.background_refresh_queued
+    assert outcome.cache_statuses["nasdaq_selection"] == "fresh_hit"
+    assert "nasdaq_background_refresh" not in outcome.cache_statuses
+
+
+def test_background_nasdaq_refresh_persists_selection_and_snapshot(
+    tmp_path,
+    monkeypatch,
+):
+    holdings = _LiveHoldingsProvider("non_ucits").get_holdings()
+    selection = fallback_current_selection(
+        holdings,
+        reason="Background fixture.",
+    )
+
+    class BackgroundProvider:
+        cache_status = "fresh_hit"
+        liquidity_cache_status = "network_refresh"
+
+        def __init__(self, **_kwargs):
+            pass
+
+        def get_annual_selection(self, current_holdings):
+            assert list(current_holdings["ticker"]) == ["A", "B", "C"]
+            return selection
+
+    monkeypatch.setattr(
+        snapshot_service,
+        "NasdaqPublicUniverseProvider",
+        BackgroundProvider,
+    )
+    monkeypatch.setattr(
+        snapshot_service,
+        "recompute_snapshot",
+        lambda **kwargs: SimpleNamespace(snapshot_id=77),
+    )
+    cache_path = tmp_path / "providers.sqlite3"
+    job_key = "nasdaq-selection:non_ucits:float"
+
+    snapshot_service._run_nasdaq_refresh(
+        job_key=job_key,
+        db_path=tmp_path / "snapshots.sqlite3",
+        holdings=holdings,
+        holdings_csv=None,
+        universe="non_ucits",
+        weighting_basis="float",
+        provider_cache_path=cache_path,
+        holdings_fingerprint_value=holdings_fingerprint(holdings),
+    )
+
+    cache = ProviderCache(cache_path)
+    job = cache.get_job(job_key)
+    cached_selection = cache.get_selection(
+        "non_ucits",
+        holdings_fingerprint(holdings),
+        max_age_seconds=86_400,
+    )
+    assert job is not None
+    assert job["status"] == "complete"
+    assert job["snapshot_id"] == 77
+    assert cached_selection is not None
+    assert cached_selection.selection.selected_tickers == ("A", "B", "C")
 
 
 def test_rebalance_failure_preserves_live_snapshot(

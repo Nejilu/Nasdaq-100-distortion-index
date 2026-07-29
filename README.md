@@ -333,14 +333,23 @@ used.
 ```text
 qqq_holdings_provider.py  # Nasdaq-100 and S&P 500 iShares provider chains
 acwi_weights_provider.py  # ACWI matching, ADR labels, calibrated fallbacks
-active_share.py           # NDX/SPX union, normalization, and Active Share
-nasdaq100_rebalance.py    # annual/quarterly selection and weighting engine
-rebalance_analytics.py    # annual thresholds, stages, transfers, and rank audit
+ndx_wdi/domain/           # pure engines; no network, database, or UI imports
+  active_share.py         # NDX/SPX union, normalization, and Active Share
+  distortion.py           # WDI calculation, coverage, and statuses
+  market_quality.py       # shared float-data validity rules
+  rebalance.py            # annual/quarterly selection and weighting rules
+  rebalance_analytics.py  # thresholds, transfers, and rank audit
+ndx_wdi/ui/runtime.py     # snapshot-scoped Streamlit data and analysis caches
+active_share.py           # backward-compatible domain imports
+distortion_engine.py      # backward-compatible domain imports
+rebalance_analytics.py    # backward-compatible domain imports
+nasdaq100_rebalance.py    # Nasdaq/Yahoo adapter + domain imports
 edgar_quarterly_history.py # N-PORT archive, CUSIP history, quarterly scores
 market_data_provider.py   # live market data through yfinance
-distortion_engine.py      # pure calculations, coverage, and statuses
 database.py               # SQLite schema and access
 observability.py          # refresh timings, cache status, structured events
+provider_cache.py         # persistent market data, selection, and job cache
+background_jobs.py        # deduplicated single-worker refresh queue
 snapshot_service.py       # live snapshot orchestration
 api.py                    # FastAPI application
 dashboard.py              # Streamlit dashboard
@@ -349,9 +358,18 @@ run_quarterly_history.py  # rebuild the SEC quarterly archive and chart data
 tests/                    # calculations, parsing, persistence, and API tests
 ```
 
-Providers expose small contracts, allowing a licensed or more reliable data feed
-to replace Invesco or yfinance without changing the calculation engine, API, or
-dashboard.
+The application imports `ndx_wdi.domain` directly. Root-level calculation
+modules remain as compatibility facades for existing scripts and tests.
+Providers expose small contracts, allowing a licensed or more reliable data
+feed to replace Invesco or yfinance without changing the calculation engines,
+API, or dashboard.
+
+Each Streamlit analysis panel runs as an isolated fragment. Widget interactions
+inside a panel therefore do not rerun the page header, database selection, or
+the other panels. Immutable `snapshot_id` values key the component, Active
+Share, annual-analysis, and quarterly-history caches. A newly persisted
+snapshot naturally invalidates those views without clearing unrelated cached
+data.
 
 ## Installation
 
@@ -440,13 +458,34 @@ with the snapshot. The same fields are returned by `POST /api/recompute`,
 - `performance_status`: `within_budget` or `slow`
 - `timings_ms`: database initialization, holdings, universe selection, market
   data, reference data, calculations, and persistence
-- `cache_statuses`: the Nasdaq universe cache outcome and the explicitly opaque
-  yfinance internal cache
+- `cache_statuses`: separate outcomes for NDX fund holdings, ACWI, S&P 500 fund
+  holdings, yfinance market data, and Nasdaq annual selection
 
 `NDX_REFRESH_WARN_SECONDS` controls the non-failing slow-refresh threshold and
 defaults to 180 seconds. Completed and failed refreshes also emit structured JSON
 events through Python logging, making the current local logs usable by a future
 metrics collector without changing the pipeline again.
+
+Provider data uses stale-while-revalidate behavior:
+
+- parsed IQQ/CNDX/QQQ/EQQQ, ACWI, IVV, and CSPX portfolios are cached for six
+  hours; a source failure retains the last valid complete portfolio
+- current prices are cached for 10 minutes and refreshed in one yfinance batch
+- float shares, total shares, and market capitalization are cached for 24 hours
+- Nasdaq public-universe, liquidity, and annual-selection results are cached for
+  24 hours
+- failed fundamental requests retain stale values and back off for 60 seconds
+
+The foreground snapshot never waits for a Nasdaq eligibility refresh. It uses a
+fresh or stale compatible annual selection when available, otherwise it uses the
+current constituents. A single background worker refreshes the public universe
+and liquidity, persists the new selection, and creates an updated snapshot. The
+dashboard polls the durable job status and reloads automatically when that
+snapshot is ready.
+
+Provider cache keys include the configured provider chain and source URLs, so a
+URL or provider-order change does not reuse an incompatible portfolio. Explicit
+local CSV inputs bypass the fund cache and are read on every refresh.
 
 ## Live-source usage
 

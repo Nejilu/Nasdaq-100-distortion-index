@@ -5,6 +5,7 @@ from __future__ import annotations
 import html
 import json
 import os
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -12,13 +13,20 @@ import plotly.graph_objects as go
 import streamlit as st
 from dotenv import load_dotenv
 
-from active_share import calculate_active_share_sleeves
 from dashboard_chart_data import prepare_constituent_weight_comparison
 from database import SnapshotDatabase
-from rebalance_analytics import (
+from ndx_wdi.domain.active_share import calculate_active_share_sleeves
+from ndx_wdi.domain.rebalance_analytics import (
     AnnualRebalanceAnalysis,
-    analyze_annual_rebalance,
 )
+from ndx_wdi.ui.runtime import (
+    get_database,
+    load_active_share,
+    load_annual_analysis,
+    load_components,
+    load_quarterly_history,
+)
+from provider_cache import ProviderCache, background_job_key
 from snapshot_service import recompute_snapshot
 
 
@@ -440,8 +448,46 @@ for token, value in {
 st.html(dashboard_css)
 
 
+def _database_path() -> str:
+    return os.getenv("NDX_DB_PATH", "data/ndx_wdi.sqlite3")
+
+
 def _database() -> SnapshotDatabase:
-    return SnapshotDatabase(os.getenv("NDX_DB_PATH", "data/ndx_wdi.sqlite3"))
+    return get_database(_database_path())
+
+
+@st.fragment(run_every=3)
+def _poll_background_refresh(
+    rendered_snapshot_id: int,
+    universe: str,
+    weighting_basis: str,
+) -> None:
+    cache = ProviderCache(
+        os.getenv(
+            "NDX_PROVIDER_CACHE_PATH",
+            "data/provider_cache.sqlite3",
+        )
+    )
+    job = cache.get_job(background_job_key(universe, weighting_basis))
+    if job is None:
+        return
+    completed_snapshot_id = job.get("snapshot_id")
+    if (
+        job.get("status") == "complete"
+        and completed_snapshot_id is not None
+        and int(completed_snapshot_id) > rendered_snapshot_id
+    ):
+        st.rerun()
+    if job.get("status") == "running":
+        st.caption(
+            "Annual universe and liquidity are refreshing in the background. "
+            "Current metrics remain available."
+        )
+    elif job.get("status") == "failed":
+        st.caption(
+            "The background annual-universe refresh did not complete. "
+            "The last cached selection remains active."
+        )
 
 
 def _percent(value: float | None) -> str:
@@ -463,6 +509,7 @@ def _display_date(value: object) -> str:
     return parsed.strftime("%b %d, %Y")
 
 
+@st.cache_data(show_spinner=False, max_entries=64)
 def _component_table(
     frame: pd.DataFrame,
     weighting_basis: str,
@@ -534,6 +581,7 @@ def _component_table(
     return result
 
 
+@st.cache_data(show_spinner=False, max_entries=64)
 def _table_for_display(
     frame: pd.DataFrame,
     weighting_basis: str,
@@ -872,6 +920,7 @@ def _valid_components(components: pd.DataFrame) -> pd.DataFrame:
     ].copy()
 
 
+@st.cache_data(show_spinner=False, max_entries=64)
 def _components_for_view(
     components: pd.DataFrame,
     *,
@@ -930,6 +979,7 @@ def _outside_label_axis_range(
     return [lower - padding, upper + padding]
 
 
+@st.cache_data(show_spinner=False, max_entries=64)
 def _active_share_view_frame(
     components: pd.DataFrame,
     *,
@@ -946,6 +996,17 @@ def _active_share_view_frame(
         frame[column] = pd.to_numeric(frame[column], errors="coerce")
     frame = frame.dropna(subset=[ndx_column, "spx_weight", delta_column])
     return frame, ndx_column, delta_column
+
+
+@st.cache_data(show_spinner=False, max_entries=32)
+def _active_share_sleeves(
+    components: pd.DataFrame,
+    ndx_weight_column: str,
+):
+    return calculate_active_share_sleeves(
+        components,
+        ndx_weight_column=ndx_weight_column,
+    )
 
 
 def _render_active_share_strip(
@@ -1002,12 +1063,14 @@ def _render_active_share_strip(
     )
 
 
+@st.cache_data(show_spinner=False, max_entries=32)
 def _active_share_extreme_figure(
     frame: pd.DataFrame,
     *,
     delta_column: str,
     ndx_column: str,
     side: str,
+    theme_mode: str,
 ) -> go.Figure:
     if side == "ndx":
         chart = frame.loc[frame[delta_column].gt(0)].nlargest(
@@ -1094,6 +1157,7 @@ def _render_active_share_extremes(
                 delta_column=delta_column,
                 ndx_column=ndx_column,
                 side="ndx",
+                theme_mode="dark" if IS_DARK_MODE else "light",
             ),
             width="stretch",
             config={"displayModeBar": False},
@@ -1106,6 +1170,7 @@ def _render_active_share_extremes(
                 delta_column=delta_column,
                 ndx_column=ndx_column,
                 side="spx",
+                theme_mode="dark" if IS_DARK_MODE else "light",
             ),
             width="stretch",
             config={"displayModeBar": False},
@@ -1291,12 +1356,14 @@ def _render_active_share_top_x(
     )
 
 
+@st.cache_data(show_spinner=False, max_entries=48)
 def _active_share_sleeve_figure(
     components: pd.DataFrame,
     *,
     weight_column: str,
     color: str,
     maximum_holdings: int = 25,
+    theme_mode: str,
 ) -> go.Figure:
     sleeve = components.loc[
         pd.to_numeric(components[weight_column], errors="coerce").gt(0)
@@ -1359,9 +1426,9 @@ def _render_active_share_sleeves(
     ndx_column = (
         "rebalanced_ndx_weight" if rebalanced_view else "ndx_weight"
     )
-    sleeves = calculate_active_share_sleeves(
+    sleeves = _active_share_sleeves(
         components,
-        ndx_weight_column=ndx_column,
+        ndx_column,
     )
     st.subheader("Synthetic 100% Active Share portfolios")
     st.caption(
@@ -1409,6 +1476,7 @@ def _render_active_share_sleeves(
                     sleeves.components,
                     weight_column=weight_column,
                     color=color,
+                    theme_mode="dark" if IS_DARK_MODE else "light",
                 ),
                 width="stretch",
                 config={"displayModeBar": False},
@@ -1455,20 +1523,18 @@ def _render_active_share_sleeves(
                 )
 
 
+@st.fragment
 def _render_active_share_panel(
-    database: SnapshotDatabase,
     snapshot: dict[str, object],
+    summary: dict[str, object] | None,
+    components: pd.DataFrame,
 ) -> None:
-    summary = database.get_active_share(int(snapshot["snapshot_id"]))
     if summary is None:
         st.info(
             "No NDX vs S&P 500 comparison is stored for this snapshot. "
             "Use Refresh to retrieve the matching iShares holdings."
         )
         return
-    components = pd.DataFrame(
-        database.get_active_share_components(int(snapshot["snapshot_id"]))
-    )
     annual_available = (
         summary.get("rebalanced_active_share") is not None
         and not pd.isna(summary.get("rebalanced_active_share"))
@@ -2496,6 +2562,22 @@ def _annual_largest_transfers_figure(
     return figure
 
 
+@st.cache_data(show_spinner=False, max_entries=16)
+def _annual_panel_figures(
+    snapshot_id: int,
+    analysis: AnnualRebalanceAnalysis,
+    theme_mode: str,
+) -> dict[str, go.Figure]:
+    return {
+        "cohort": _annual_company_cohort_figure(analysis),
+        "cumulative_weights": _annual_cumulative_weights_figure(analysis),
+        "float_multiple": _annual_float_multiple_figure(analysis),
+        "cumulative_transfer": _annual_cumulative_transfer_figure(analysis),
+        "largest_transfers": _annual_largest_transfers_figure(analysis),
+    }
+
+
+@st.fragment
 def _render_annual_reconstitution_panel(
     snapshot: dict[str, object],
     components: pd.DataFrame,
@@ -2507,10 +2589,18 @@ def _render_annual_reconstitution_panel(
         )
         return
     try:
-        analysis = analyze_annual_rebalance(components)
+        analysis = load_annual_analysis(
+            _database_path(),
+            int(snapshot["snapshot_id"]),
+        )
     except ValueError as exc:
         st.warning(f"Annual-reconstitution analysis is unavailable: {exc}")
         return
+    figures = _annual_panel_figures(
+        int(snapshot["snapshot_id"]),
+        analysis,
+        "dark" if IS_DARK_MODE else "light",
+    )
 
     _render_annual_reconstitution_summary(snapshot, analysis)
     st.markdown(
@@ -2550,7 +2640,7 @@ def _render_annual_reconstitution_panel(
         "cohort to a 40% aggregate weight while preserving company rank."
     )
     st.plotly_chart(
-        _annual_company_cohort_figure(analysis),
+        figures["cohort"],
         width="stretch",
         config={"displayModeBar": False},
     )
@@ -2565,14 +2655,14 @@ def _render_annual_reconstitution_panel(
     with input_columns[0]:
         st.markdown("**Cumulative selected-company weights**")
         st.plotly_chart(
-            _annual_cumulative_weights_figure(analysis),
+            figures["cumulative_weights"],
             width="stretch",
             config={"displayModeBar": False},
         )
     with input_columns[1]:
         st.markdown("**Float adjustment used in Modified Market Cap**")
         st.plotly_chart(
-            _annual_float_multiple_figure(analysis),
+            figures["float_multiple"],
             width="stretch",
             config={"displayModeBar": False},
         )
@@ -2610,14 +2700,14 @@ def _render_annual_reconstitution_panel(
     with transfer_columns[0]:
         st.markdown("**Cumulative transfer by initial rank**")
         st.plotly_chart(
-            _annual_cumulative_transfer_figure(analysis),
+            figures["cumulative_transfer"],
             width="stretch",
             config={"displayModeBar": False},
         )
     with transfer_columns[1]:
         st.markdown("**Largest capping donors and recipients**")
         st.plotly_chart(
-            _annual_largest_transfers_figure(analysis),
+            figures["largest_transfers"],
             width="stretch",
             config={"displayModeBar": False},
         )
@@ -2816,28 +2906,20 @@ def _render_rebalance_membership_chart(components: pd.DataFrame) -> None:
 
 
 def _load_quarterly_history() -> pd.DataFrame:
-    history_path = os.getenv(
-        "NDX_QUARTERLY_HISTORY_PATH",
-        "data/edgar_quarterly_history.csv",
+    history_path = Path(
+        os.getenv(
+            "NDX_QUARTERLY_HISTORY_PATH",
+            "data/edgar_quarterly_history.csv",
+        )
     )
-    if not os.path.exists(history_path):
-        return pd.DataFrame()
-    history = pd.read_csv(history_path)
-    required = {
-        "report_date",
-        "ndx_wdi",
-        "ndx_wdi_raw",
-        "coverage_ratio",
-        "matched_count",
-        "estimated_count",
-        "excluded_non_comparable_count",
-        "rebalance_type",
-    }
-    if required.difference(history.columns):
-        return pd.DataFrame()
-    history["report_date"] = pd.to_datetime(history["report_date"], errors="coerce")
-    return history.dropna(subset=["report_date", "ndx_wdi"]).sort_values(
-        "report_date"
+    modified_at_ns = (
+        history_path.stat().st_mtime_ns
+        if history_path.exists()
+        else None
+    )
+    return load_quarterly_history(
+        str(history_path),
+        modified_at_ns,
     )
 
 
@@ -3116,6 +3198,66 @@ def _render_rankings(
             )
 
 
+@st.fragment
+def _render_distortion_panel(
+    snapshot: dict[str, object],
+    components: pd.DataFrame,
+    universe: str,
+    weighting_basis: str,
+    universe_label: str,
+    basis_label: str,
+) -> None:
+    _render_score_strip(
+        snapshot,
+        components,
+        universe_label,
+        basis_label,
+    )
+    show_rebalanced = _render_rebalance_controls(snapshot)
+    _render_source_status(snapshot)
+    display_components = _components_for_view(
+        components,
+        rebalanced_view=show_rebalanced,
+    )
+
+    show_history = universe == "non_ucits" and weighting_basis == "float"
+    if show_history:
+        chart_columns = st.columns([0.93, 1.35], gap="large")
+        with chart_columns[0]:
+            _render_weight_difference_chart(
+                display_components,
+                rebalanced_view=show_rebalanced,
+            )
+        with chart_columns[1]:
+            _render_quarterly_history(snapshot)
+    else:
+        _render_weight_difference_chart(
+            display_components,
+            rebalanced_view=show_rebalanced,
+        )
+
+    _render_constituent_weight_comparison(
+        display_components,
+        weighting_basis,
+        rebalanced_view=show_rebalanced,
+    )
+
+    if show_rebalanced:
+        _render_rebalance_changes_chart(components)
+        _render_rebalance_membership_chart(components)
+
+    _render_rankings(
+        display_components,
+        weighting_basis,
+        rebalanced_view=show_rebalanced,
+    )
+
+    st.caption(
+        "Universes are never merged or averaged. Each score retains the reference "
+        "fund and holdings source that were actually used."
+    )
+
+
 title_columns = st.columns([4.6, 0.8], gap="small", vertical_alignment="top")
 with title_columns[0]:
     st.title("Nasdaq-100 Analytics")
@@ -3249,8 +3391,16 @@ if snapshot is None:
 if notice := st.session_state.pop("_refresh_notice", None):
     st.toast(notice, icon=":material/check_circle:")
 
-components = pd.DataFrame(database.get_components(int(snapshot["snapshot_id"])))
+_poll_background_refresh(
+    int(snapshot["snapshot_id"]),
+    universe,
+    weighting_basis,
+)
 if panel_label == "Annual Reconstitution":
+    components = load_components(
+        _database_path(),
+        int(snapshot["snapshot_id"]),
+    )
     _render_annual_reconstitution_panel(snapshot, components)
     st.caption(
         "This is an auditable public-data simulation, not an official Nasdaq "
@@ -3258,58 +3408,29 @@ if panel_label == "Annual Reconstitution":
         "outside the model."
     )
 elif panel_label == "NDX vs S&P 500":
-    _render_active_share_panel(database, snapshot)
+    active_share_summary, active_share_components = load_active_share(
+        _database_path(),
+        int(snapshot["snapshot_id"]),
+    )
+    _render_active_share_panel(
+        snapshot,
+        active_share_summary,
+        active_share_components,
+    )
     st.caption(
         "Active Share uses the complete normalized equity holdings union. "
         "ETF pairs are never merged or averaged across regulatory universes."
     )
 else:
-    _render_score_strip(
+    components = load_components(
+        _database_path(),
+        int(snapshot["snapshot_id"]),
+    )
+    _render_distortion_panel(
         snapshot,
         components,
+        universe,
+        weighting_basis,
         universe_label,
         basis_label,
-    )
-    show_rebalanced = _render_rebalance_controls(snapshot)
-    _render_source_status(snapshot)
-    display_components = _components_for_view(
-        components,
-        rebalanced_view=show_rebalanced,
-    )
-
-    show_history = universe == "non_ucits" and weighting_basis == "float"
-    if show_history:
-        chart_columns = st.columns([0.93, 1.35], gap="large")
-        with chart_columns[0]:
-            _render_weight_difference_chart(
-                display_components,
-                rebalanced_view=show_rebalanced,
-            )
-        with chart_columns[1]:
-            _render_quarterly_history(snapshot)
-    else:
-        _render_weight_difference_chart(
-            display_components,
-            rebalanced_view=show_rebalanced,
-        )
-
-    _render_constituent_weight_comparison(
-        display_components,
-        weighting_basis,
-        rebalanced_view=show_rebalanced,
-    )
-
-    if show_rebalanced:
-        _render_rebalance_changes_chart(components)
-        _render_rebalance_membership_chart(components)
-
-    _render_rankings(
-        display_components,
-        weighting_basis,
-        rebalanced_view=show_rebalanced,
-    )
-
-    st.caption(
-        "Universes are never merged or averaged. Each score retains the reference "
-        "fund and holdings source that were actually used."
     )
