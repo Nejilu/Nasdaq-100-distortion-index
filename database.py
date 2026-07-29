@@ -50,6 +50,9 @@ CREATE TABLE IF NOT EXISTS snapshots (
     ,rebalance_acwi_conversion_scale REAL
     ,rebalance_acwi_calibration_count INTEGER
     ,rebalance_notes TEXT
+    ,performance_status TEXT
+    ,timings_json TEXT
+    ,cache_statuses_json TEXT
 );
 
 CREATE TABLE IF NOT EXISTS snapshot_components (
@@ -187,6 +190,9 @@ class SnapshotDatabase:
             "rebalance_acwi_conversion_scale": "REAL",
             "rebalance_acwi_calibration_count": "INTEGER",
             "rebalance_notes": "TEXT",
+            "performance_status": "TEXT",
+            "timings_json": "TEXT",
+            "cache_statuses_json": "TEXT",
         }
         for column, definition in additions.items():
             if column not in existing:
@@ -404,6 +410,32 @@ class SnapshotDatabase:
             connection.commit()
         return snapshot_id
 
+    def update_snapshot_observability(
+        self,
+        snapshot_id: int,
+        *,
+        performance_status: str,
+        timings_ms: dict[str, float],
+        cache_statuses: dict[str, str],
+    ) -> None:
+        with self.connect() as connection:
+            cursor = connection.execute(
+                """
+                UPDATE snapshots
+                SET performance_status = ?, timings_json = ?, cache_statuses_json = ?
+                WHERE snapshot_id = ?
+                """,
+                (
+                    performance_status,
+                    json.dumps(timings_ms, sort_keys=True),
+                    json.dumps(cache_statuses, sort_keys=True),
+                    snapshot_id,
+                ),
+            )
+            if cursor.rowcount != 1:
+                raise ValueError(f"Snapshot {snapshot_id} does not exist.")
+            connection.commit()
+
     def get_current(
         self,
         universe: str | None = None,
@@ -432,7 +464,7 @@ class SnapshotDatabase:
                     "ORDER BY timestamp DESC, snapshot_id DESC LIMIT 1",
                     (universe, weighting_basis),
                 ).fetchone()
-        return dict(row) if row else None
+        return _snapshot_row(row)
 
     def get_current_by_universe(
         self, weighting_basis: str = "float"
@@ -474,7 +506,7 @@ class SnapshotDatabase:
                     "ORDER BY timestamp DESC, snapshot_id DESC LIMIT ?",
                     (universe, weighting_basis, limit),
                 ).fetchall()
-        return [dict(row) for row in rows]
+        return [_snapshot_row(row) for row in rows]
 
     def get_components(
         self,
@@ -503,7 +535,7 @@ class SnapshotDatabase:
             row = connection.execute(
                 "SELECT * FROM snapshots WHERE snapshot_id = ?", (snapshot_id,)
             ).fetchone()
-        return dict(row) if row else None
+        return _snapshot_row(row)
 
     def get_active_share(
         self,
@@ -562,3 +594,24 @@ def _sql_value(value: object) -> object:
     if isinstance(value, float) and not math.isfinite(value):
         return None
     return value
+
+
+def _snapshot_row(row: sqlite3.Row | None) -> dict[str, Any] | None:
+    if row is None:
+        return None
+    result = dict(row)
+    result["timings_ms"] = _json_object(result.pop("timings_json", None))
+    result["cache_statuses"] = _json_object(
+        result.pop("cache_statuses_json", None)
+    )
+    return result
+
+
+def _json_object(value: object) -> dict[str, Any]:
+    if not value:
+        return {}
+    try:
+        decoded = json.loads(str(value))
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return {}
+    return decoded if isinstance(decoded, dict) else {}

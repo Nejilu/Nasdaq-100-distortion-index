@@ -76,6 +76,8 @@ class _LiveAcwiProvider:
 
 
 class _LiveNasdaqUniverseProvider:
+    cache_status = "fixture_hit"
+
     def __init__(self, **_: object) -> None:
         pass
 
@@ -143,6 +145,14 @@ def test_live_snapshot_roundtrip(tmp_path, live_sources):
     assert current["holdings_source"] == "test_non_ucits_live_holdings"
     assert current["market_data_source"] == "test_acwi_reference"
     assert current["reference_data_as_of"] == "2026-07-24"
+    assert current["performance_status"] == "within_budget"
+    assert current["timings_ms"]["total"] >= 0
+    assert current["timings_ms"]["database_persist"] >= 0
+    assert current["cache_statuses"] == {
+        "nasdaq_universe": "fixture_hit",
+        "yfinance": "opaque_internal_cache",
+    }
+    assert outcome.timings_ms == current["timings_ms"]
     assert current["rebalance_ndx_wdi"] is not None
     assert current["rebalance_method"] == "annual_modified_market_cap_2026"
     assert len(components) == 3
@@ -171,7 +181,6 @@ def test_rebalance_failure_preserves_live_snapshot(
     current = database.get_current()
     components = database.get_components()
     active_share = database.get_active_share()
-    active_components = database.get_active_share_components()
 
     assert outcome.rebalance is None
     assert outcome.result.snapshot_status == "complete"
@@ -198,6 +207,8 @@ def test_minimal_api(tmp_path, monkeypatch, live_sources):
     payload = response.json()["snapshots"]
     assert set(payload) == {"non_ucits", "ucits"}
     assert payload["ucits"]["snapshot_status"] == "complete"
+    assert payload["ucits"]["performance_status"] == "within_budget"
+    assert payload["ucits"]["timings_ms"]["total"] >= 0
 
     current_response = client.get("/api/current")
     assert current_response.status_code == 200

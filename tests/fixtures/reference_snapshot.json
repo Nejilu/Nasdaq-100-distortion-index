@@ -1,0 +1,45 @@
+{
+  "holdings": [
+    {
+      "ticker": "A",
+      "company_name": "A Corp",
+      "actual_weight": 0.5
+    },
+    {
+      "ticker": "B",
+      "company_name": "B Corp",
+      "actual_weight": 0.3
+    },
+    {
+      "ticker": "C",
+      "company_name": "C Corp",
+      "actual_weight": 0.2
+    }
+  ],
+  "market_data": [
+    {
+      "ticker": "A",
+      "price": 1.0,
+      "float_shares": 60.0
+    },
+    {
+      "ticker": "B",
+      "price": 1.0,
+      "float_shares": 25.0
+    },
+    {
+      "ticker": "C",
+      "price": 1.0,
+      "float_shares": 15.0
+    }
+  ],
+  "expected": {
+    "ndx_wdi": 10.0,
+    "coverage_ratio": 1.0,
+    "component_contributions": {
+      "A": 5.0,
+      "B": 2.5,
+      "C": 2.5
+    }
+  }
+}
