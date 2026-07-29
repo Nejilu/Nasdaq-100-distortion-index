@@ -172,6 +172,40 @@ def test_unknown_liquidity_aborts_selection_instead_of_excluding_security():
         _require_known_liquidity(universe, ["KNOWN", "UNKNOWN"])
 
 
+def test_universe_provider_reports_fallback_cache_hit(tmp_path, monkeypatch):
+    cached = pd.DataFrame(
+        {
+            "ticker": [f"T{i}" for i in range(1_000)],
+            "company_name": [f"Company {i}" for i in range(1_000)],
+            "company_id": [f"CIK:{i}" for i in range(1_000)],
+            "full_market_cap": [1_000_000.0] * 1_000,
+            "security_type": ["Ordinary share"] * 1_000,
+            "base_eligible": [True] * 1_000,
+        }
+    )
+    cache_path = tmp_path / "nasdaq-universe.csv"
+    cached.to_csv(cache_path, index=False)
+
+    response = SimpleNamespace(
+        raise_for_status=lambda: None,
+        json=lambda: {"data": {"rows": []}},
+    )
+    monkeypatch.setattr(
+        "nasdaq100_rebalance.requests.get",
+        lambda *_args, **_kwargs: response,
+    )
+    monkeypatch.setattr("nasdaq100_rebalance.time.sleep", lambda _seconds: None)
+    provider = NasdaqPublicUniverseProvider(
+        timeout=0.01,
+        cache_path=cache_path,
+    )
+
+    result = provider._download_universe()
+
+    assert len(result) == 1_000
+    assert provider.cache_status == "fallback_hit"
+
+
 def test_liquidity_download_has_a_global_deadline(monkeypatch):
     def slow_download(**_kwargs):
         time.sleep(0.1)

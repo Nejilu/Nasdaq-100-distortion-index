@@ -1,6 +1,8 @@
+import json
 import math
 import sys
 import time
+from pathlib import Path
 from types import SimpleNamespace
 
 import pandas as pd
@@ -18,32 +20,27 @@ from market_data_provider import (
 
 
 def test_expected_ndx_wdi_is_10_and_contributions_reconcile():
-    holdings = pd.DataFrame(
-        {
-            "ticker": ["A", "B", "C"],
-            "company_name": ["A Corp", "B Corp", "C Corp"],
-            "actual_weight": [0.50, 0.30, 0.20],
-        }
+    fixture_path = (
+        Path(__file__).parent / "fixtures" / "reference_snapshot.json"
     )
-    # price × float_shares gives market-cap proportions 60 / 25 / 15.
-    market_data = pd.DataFrame(
-        {
-            "ticker": ["A", "B", "C"],
-            "price": [1.0, 1.0, 1.0],
-            "float_shares": [60.0, 25.0, 15.0],
-        }
-    )
+    fixture = json.loads(fixture_path.read_text(encoding="utf-8"))
+    holdings = pd.DataFrame(fixture["holdings"])
+    market_data = pd.DataFrame(fixture["market_data"])
+    expected = fixture["expected"]
 
     result = calculate_distortion(holdings, market_data)
     components = result.components.set_index("ticker")
 
-    assert result.ndx_wdi == 10.0
+    assert result.ndx_wdi == expected["ndx_wdi"]
+    assert result.coverage_ratio == expected["coverage_ratio"]
     assert math.isclose(components["actual_weight"].sum(), 1.0)
     assert math.isclose(components["float_weight"].sum(), 1.0)
     assert math.isclose(components["distortion_contribution"].sum(), result.ndx_wdi)
-    assert math.isclose(components.loc["A", "distortion_contribution"], 5.0)
-    assert math.isclose(components.loc["B", "distortion_contribution"], 2.5)
-    assert math.isclose(components.loc["C", "distortion_contribution"], 2.5)
+    for ticker, contribution in expected["component_contributions"].items():
+        assert math.isclose(
+            components.loc[ticker, "distortion_contribution"],
+            contribution,
+        )
 
 
 def test_normalize_actual_weights():

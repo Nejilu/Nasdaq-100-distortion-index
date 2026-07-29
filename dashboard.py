@@ -499,7 +499,7 @@ def _component_table(
             )
         )
         result["rebalance_membership"] = result["rebalance_membership"].map(
-            {1: "Included", 0: "Removed", True: "Included", False: "Removed"}
+            {1: "Included", 0: "Removed"}
         ).fillna("n/a")
     result["weight_ratio"] = result["weight_ratio"].map(
         lambda value: "n/a" if pd.isna(value) else f"{value:.2f}x"
@@ -1152,7 +1152,7 @@ def _render_active_share_top_x(
         f"{ndx_total:.2%}",
     )
     metrics[1].metric(
-        f"Same names in S&P 500",
+        "Same names in S&P 500",
         f"{spx_total:.2%}",
     )
     metrics[2].metric(
@@ -3221,12 +3221,18 @@ with help_column:
 if recompute_clicked:
     with st.spinner(f"Refreshing {universe_label}..."):
         try:
-            recompute_snapshot(
+            outcome = recompute_snapshot(
                 db_path=os.getenv("NDX_DB_PATH"),
                 universe=universe,
                 weighting_basis=weighting_basis,
             )
-            st.session_state["_refresh_notice"] = f"{universe_label} updated"
+            timings_ms = getattr(outcome, "timings_ms", None) or {}
+            elapsed_ms = timings_ms.get("total")
+            st.session_state["_refresh_notice"] = (
+                f"{universe_label} updated in {elapsed_ms / 1_000:.1f}s"
+                if elapsed_ms is not None
+                else f"{universe_label} updated"
+            )
             st.rerun()
         except Exception as exc:
             st.error(f"Refresh failed: {exc}")

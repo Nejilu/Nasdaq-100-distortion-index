@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
@@ -29,6 +30,7 @@ from nasdaq100_rebalance import (
     fallback_current_selection,
     simulate_rebalance,
 )
+from observability import PipelineMetrics, performance_status, structured_event
 from qqq_holdings_provider import (
     DEFAULT_CNDX_URL,
     DEFAULT_CSPX_URL,
@@ -44,6 +46,7 @@ from qqq_holdings_provider import (
 
 
 UNIVERSES = ("non_ucits", "ucits")
+LOGGER = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -60,6 +63,9 @@ class RecomputeOutcome:
     source_failures: tuple[str, ...] = ()
     rebalance: RebalanceResult | None = None
     active_share: ActiveShareResult | None = None
+    performance_status: str = "unknown"
+    timings_ms: dict[str, float] | None = None
+    cache_statuses: dict[str, str] | None = None
 
     def summary(self) -> dict[str, object]:
         summary = {
@@ -81,6 +87,9 @@ class RecomputeOutcome:
             "holdings_source": self.holdings_source,
             "market_data_source": self.market_data_source,
             "source_failures": list(self.source_failures),
+            "performance_status": self.performance_status,
+            "timings_ms": dict(self.timings_ms or {}),
+            "cache_statuses": dict(self.cache_statuses or {}),
         }
         if self.rebalance is not None:
             summary.update(
@@ -127,11 +136,57 @@ def recompute_snapshot(
     weighting_basis: str = "float",
 ) -> RecomputeOutcome:
     """Compute and persist one snapshot from live holdings and market data."""
+    metrics = PipelineMetrics()
+    try:
+        outcome = _recompute_snapshot(
+            db_path=db_path,
+            holdings_csv=holdings_csv,
+            universe=universe,
+            weighting_basis=weighting_basis,
+            metrics=metrics,
+        )
+    except Exception as exc:
+        metrics.finish()
+        LOGGER.error(
+            structured_event(
+                "snapshot_recompute_failed",
+                universe=universe,
+                weighting_basis=weighting_basis,
+                error_type=type(exc).__name__,
+                error=str(exc),
+                timings_ms=metrics.timings_ms,
+                cache_statuses=metrics.cache_statuses,
+            )
+        )
+        raise
+    LOGGER.info(
+        structured_event(
+            "snapshot_recompute_complete",
+            snapshot_id=outcome.snapshot_id,
+            universe=universe,
+            weighting_basis=weighting_basis,
+            performance_status=outcome.performance_status,
+            timings_ms=outcome.timings_ms,
+            cache_statuses=outcome.cache_statuses,
+        )
+    )
+    return outcome
+
+
+def _recompute_snapshot(
+    *,
+    db_path: str | Path | None,
+    holdings_csv: str | Path | None,
+    universe: str,
+    weighting_basis: str,
+    metrics: PipelineMetrics,
+) -> RecomputeOutcome:
     if universe not in UNIVERSES:
         raise ValueError(f"universe must be one of: {UNIVERSES}.")
     if weighting_basis not in {"float", "total"}:
         raise ValueError("weighting_basis must be float or total.")
     database = SnapshotDatabase(db_path or os.getenv("NDX_DB_PATH", "data/ndx_wdi.sqlite3"))
+    metrics.checkpoint("database_initialize")
     coverage_threshold = float(os.getenv("NDX_COVERAGE_THRESHOLD", "0.99"))
 
     holdings_provider = build_holdings_chain(universe, holdings_csv=holdings_csv)
@@ -142,24 +197,33 @@ def recompute_snapshot(
         ),
         cache_dir=os.getenv("YFINANCE_CACHE_DIR", "data/yfinance_cache"),
     )
+    metrics.record_cache("yfinance", "opaque_internal_cache")
     holdings = holdings_provider.get_holdings()
+    metrics.checkpoint("ndx_holdings")
     source_failures = list(holdings_provider.failures)
     holdings_as_of = holdings_provider.holdings_as_of
+    selection_provider = NasdaqPublicUniverseProvider(
+        timeout=int(os.getenv("HTTP_TIMEOUT_SECONDS", "30")),
+        cache_path=os.getenv(
+            "NASDAQ_UNIVERSE_CACHE_PATH",
+            "data/nasdaq_public_universe_cache.csv",
+        ),
+    )
     try:
-        selection = NasdaqPublicUniverseProvider(
-            timeout=int(os.getenv("HTTP_TIMEOUT_SECONDS", "30")),
-            cache_path=os.getenv(
-                "NASDAQ_UNIVERSE_CACHE_PATH",
-                "data/nasdaq_public_universe_cache.csv",
-            ),
-        ).get_annual_selection(holdings)
+        selection = selection_provider.get_annual_selection(holdings)
     except Exception as exc:
         failure = f"Nasdaq rebalance universe: {type(exc).__name__}: {exc}"
         source_failures.append(failure)
         selection = fallback_current_selection(holdings, reason=failure)
+    metrics.record_cache(
+        "nasdaq_universe",
+        getattr(selection_provider, "cache_status", "not_observable"),
+    )
+    metrics.checkpoint("nasdaq_selection")
 
     combined_holdings = _combined_rebalance_holdings(holdings, selection.securities)
     market_data = market_provider.get_market_data(combined_holdings["ticker"].tolist())
+    metrics.checkpoint("market_data")
     reference_data_as_of = None
     rebalance_reference: pd.DataFrame
     global_yfinance_fallback = False
@@ -271,6 +335,7 @@ def recompute_snapshot(
         rebalance_reference["counterfactual_reference_raw"] = (
             rebalance_reference["price"] * rebalance_reference["shares_outstanding"]
         )
+    metrics.checkpoint("reference_data")
     result = calculate_distortion(
         holdings,
         market_data,
@@ -284,6 +349,7 @@ def recompute_snapshot(
             else "degraded_partial_coverage"
         )
         result = replace(result, snapshot_status=fallback_status)
+    metrics.checkpoint("distortion_calculation")
     rebalance: RebalanceResult | None = None
     try:
         rebalance = simulate_rebalance(
@@ -304,11 +370,13 @@ def recompute_snapshot(
                 rebalance.components,
             ),
         )
+    metrics.checkpoint("annual_reconstitution")
     active_share: ActiveShareResult | None = None
     try:
         spx_provider = build_spx_holdings_chain(universe)
         spx_holdings = spx_provider.get_holdings()
         source_failures.extend(spx_provider.failures)
+        metrics.checkpoint("spx_holdings")
         active_share = calculate_active_share(
             _build_active_share_ndx_holdings(
                 holdings,
@@ -323,6 +391,7 @@ def recompute_snapshot(
         source_failures.append(
             f"S&P 500 holdings comparison: {type(exc).__name__}: {exc}"
         )
+    metrics.checkpoint("active_share_calculation")
     holdings_source = holdings_provider.source_name
     reference_fund = holdings_provider.reference_fund
 
@@ -341,6 +410,21 @@ def recompute_snapshot(
         rebalance=rebalance,
         active_share=active_share,
     )
+    metrics.checkpoint("database_persist")
+    total_ms = metrics.finish()
+    refresh_warn_seconds = float(
+        os.getenv("NDX_REFRESH_WARN_SECONDS", "180")
+    )
+    refresh_performance_status = performance_status(
+        total_ms,
+        refresh_warn_seconds,
+    )
+    database.update_snapshot_observability(
+        snapshot_id,
+        performance_status=refresh_performance_status,
+        timings_ms=metrics.timings_ms,
+        cache_statuses=metrics.cache_statuses,
+    )
     return RecomputeOutcome(
         snapshot_id=snapshot_id,
         timestamp=timestamp,
@@ -354,6 +438,9 @@ def recompute_snapshot(
         source_failures=tuple(source_failures),
         rebalance=rebalance,
         active_share=active_share,
+        performance_status=refresh_performance_status,
+        timings_ms=dict(metrics.timings_ms),
+        cache_statuses=dict(metrics.cache_statuses),
     )
 
 

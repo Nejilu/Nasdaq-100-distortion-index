@@ -340,6 +340,7 @@ edgar_quarterly_history.py # N-PORT archive, CUSIP history, quarterly scores
 market_data_provider.py   # live market data through yfinance
 distortion_engine.py      # pure calculations, coverage, and statuses
 database.py               # SQLite schema and access
+observability.py          # refresh timings, cache status, structured events
 snapshot_service.py       # live snapshot orchestration
 api.py                    # FastAPI application
 dashboard.py              # Streamlit dashboard
@@ -363,6 +364,7 @@ python -m venv .venv
 .venv\Scripts\Activate.ps1
 python -m pip install --upgrade pip
 pip install -r requirements.txt
+pip install -r requirements-dev.txt
 Copy-Item .env.example .env
 ```
 
@@ -373,6 +375,7 @@ python -m venv .venv
 source .venv/bin/activate
 python -m pip install --upgrade pip
 pip install -r requirements.txt
+pip install -r requirements-dev.txt
 cp .env.example .env
 ```
 
@@ -427,6 +430,23 @@ control.
 
 The Refresh button updates the selected universe and capitalization basis using
 live data only.
+
+## Refresh observability
+
+Every successful refresh persists its stage timings and observable cache status
+with the snapshot. The same fields are returned by `POST /api/recompute`,
+`GET /api/current`, and the snapshot CLI:
+
+- `performance_status`: `within_budget` or `slow`
+- `timings_ms`: database initialization, holdings, universe selection, market
+  data, reference data, calculations, and persistence
+- `cache_statuses`: the Nasdaq universe cache outcome and the explicitly opaque
+  yfinance internal cache
+
+`NDX_REFRESH_WARN_SECONDS` controls the non-failing slow-refresh threshold and
+defaults to 180 seconds. Completed and failed refreshes also emit structured JSON
+events through Python logging, making the current local logs usable by a future
+metrics collector without changing the pipeline again.
 
 ## Live-source usage
 
@@ -493,11 +513,14 @@ directory.
 ## Tests
 
 ```bash
+python -m ruff check .
 python -m pytest
 ```
 
-The reference case compares published weights `A=50%`, `B=30%`, and `C=20%`
+The reference fixture in `tests/fixtures/reference_snapshot.json` compares
+published weights `A=50%`, `B=30%`, and `C=20%`
 with capitalization weights `60%`, `25%`, and `15%`, producing `NDX_WDI = 10`.
 The suite also covers normalization, missing price/share data, distribution sums,
-component contributions, SQLite persistence, provider validation, and all API
-routes.
+component contributions, refresh instrumentation, SQLite persistence, provider
+validation, and all API routes. GitHub Actions runs Ruff, compilation, and the
+full test suite on Python 3.11 and 3.12 for every pull request.

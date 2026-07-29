@@ -16,7 +16,7 @@ from concurrent.futures import (
     ThreadPoolExecutor,
     TimeoutError as FuturesTimeoutError,
 )
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date
 from io import StringIO
 from pathlib import Path
@@ -89,6 +89,7 @@ class NasdaqPublicUniverseProvider:
     timeout: int = 45
     cache_path: str | Path = "data/nasdaq_public_universe_cache.csv"
     source_name: str = "nasdaq_public_screener+symbol_directory+sec_cik+yfinance"
+    cache_status: str = field(default="not_checked", init=False)
 
     def get_quarterly_selection(
         self,
@@ -361,7 +362,9 @@ class NasdaqPublicUniverseProvider:
                 }
                 if required.issubset(cached.columns) and len(cached) >= 1_000:
                     cached["base_eligible"] = cached["base_eligible"].astype(bool)
+                    self.cache_status = "fallback_hit"
                     return cached
+            self.cache_status = "miss"
             detail = f" Last error: {last_error}" if last_error else ""
             raise ValueError(
                 f"Nasdaq screener returned only {len(rows)} rows.{detail}"
@@ -466,6 +469,7 @@ class NasdaqPublicUniverseProvider:
         cache_path = Path(self.cache_path)
         cache_path.parent.mkdir(parents=True, exist_ok=True)
         result.to_csv(cache_path, index=False)
+        self.cache_status = "network_refresh"
         return result
 
     def _download_liquidity(
