@@ -1,375 +1,444 @@
-# NDX Weight Distortion Index
+# Nasdaq-100 Analytics
 
-This project measures the gap between published Nasdaq-100 ETF weights and the
-weights the same securities would receive under a pure capitalization-based
-counterfactual.
+Nasdaq-100 Analytics is a local research application for inspecting how the
+Nasdaq-100 is weighted, how far those weights are from capitalization-based
+references, how the index differs from the S&P 500, and what a public-data
+simulation of the next annual reconstitution would produce.
 
-The default view uses the official iShares ACWI portfolio as a free-float
-reference:
+The project has evolved beyond a single distortion score. It now combines three
+connected analytical views:
+
+1. **NDX Distortion Index** - compares published Nasdaq-100 ETF weights with a
+   free-float or total-capitalization counterfactual.
+2. **NDX vs S&P 500** - measures and decomposes security-level Active Share
+   between matching iShares ETF proxies.
+3. **Annual Reconstitution** - audits the modified-market-cap calculation,
+   concentration triggers, capping transfers, rank preservation, and simulated
+   membership changes.
+
+The application is built in Python with Streamlit, FastAPI, pandas, Plotly, and
+SQLite. Calculation engines are isolated from providers, persistence, and UI
+code. Persistent provider caches and a background refresh worker keep the main
+dashboard usable when public Nasdaq or Yahoo Finance endpoints are slow.
+
+> This is an independent public-data research tool. It is not affiliated with
+> Nasdaq, BlackRock, Invesco, MSCI, S&P Global, or the SEC, and it does not
+> reproduce an official index review.
+
+## What the application shows
+
+### NDX Distortion Index
+
+The main panel compares the published weights of a Nasdaq-100 ETF proxy with
+the weights the same covered securities would receive under an uncapped
+capitalization reference.
+
+It includes:
+
+- the live `NDX_WDI` and its plain-English interpretation;
+- a quarterly historical series beginning with SEC N-PORT data from 2019;
+- the largest current overweights and underweights;
+- current constituent weights overlaid with their counterfactual weights;
+- free-float and total-capitalization modes;
+- Non-UCITS and UCITS fund universes;
+- a simulated annual-reconstitution score and optional simulated weights;
+- constituent-level sources, coverage, fallbacks, exclusions, and audit data.
+
+The score is:
 
 ```text
-reference_mass = ACWI holding market value
-float_weight = reference_mass / sum(reference_mass for Nasdaq-100 constituents)
-weight_delta = actual_weight - float_weight
-NDX_WDI = 50 x sum(abs(weight_delta))
+weight_delta_i = published_weight_i - counterfactual_weight_i
+NDX_WDI = 50 x sum(abs(weight_delta_i))
 ```
 
-ACWI market values are used instead of the displayed `Weight (%)` field because
-the market values retain precision for small positions. ADR/ADS securities and
-names absent from ACWI use a yfinance free-float fallback calibrated into the
-same ACWI fund-value units with the median ratio observed across matched names.
-The Nasdaq-listed `ASML` ADR is a maintained exception: its float is fixed at
-`88,000,000` ADRs because yfinance's consolidated value is not valid for that
-listing. Its listed total share count is also fixed at `88,000,000`, preventing
-the annual modified-cap calculation from deriving an unsupported `3x` ratio.
+An `NDX_WDI` of 24 means that 24% of the index weight would need to be
+reallocated for the two normalized distributions to match.
 
-```text
-fallback_scale = median(ACWI_market_value / yfinance_float_market_cap)
-fallback_reference_mass = yfinance_float_market_cap x fallback_scale
-counterfactual_weight = reference_mass / sum(all_ACWI_and_fallback_reference_masses)
-```
+### NDX vs S&P 500
 
-The last line renormalizes the covered selection to exactly 100%; fallbacks are
-never normalized separately from the ACWI-matched securities.
-
-The dashboard can also switch to total listed capitalization:
-
-```text
-total_market_cap = price x shares_outstanding
-total_cap_weight = total_market_cap / sum(total_market_cap)
-weight_delta = actual_weight - total_cap_weight
-```
-
-An `NDX_WDI` of 5 means that 5% of the total index weight would need to be
-reallocated to move from one distribution to the other.
-
-## Scope and methodology
-
-- Two independent universes are stored: `non_ucits` and `ucits`. They are never
-  merged or averaged.
-- Two counterfactual bases are stored separately in SQLite: `float` and `total`.
-  Switching the dashboard control never mixes their snapshots or histories.
-- Published ETF weights are always used as reported by the selected fund. The
-  project does not reconstruct ETF weights from prices or quantities.
-- GOOG and GOOGL remain separate securities.
-- Cash and explicitly non-equity positions are removed before equity weights are
-  normalized to 100%.
-- ACWI holding market values come from the official BlackRock/iShares public
-  holdings download. Exact tickers are disambiguated with company names, which
-  prevents collisions such as US `ADP` versus Aéroports de Paris and US `ROP`
-  versus Roche.
-- ADR/ADS rows are labeled and deliberately bypass ACWI because ACWI may hold
-  the issuer's primary listing rather than the US depositary receipt. Current
-  defaults are `ARM`, `ASML`, and `PDD`; `NDX_ADR_TICKERS` can extend the list.
-- Prices, `floatShares`, `sharesOutstanding`, and `marketCap` come from
-  `yfinance`. They support total capitalization, fallback weights, and fallback
-  consistency checks. The `ASML` ADR overrides both `floatShares` and
-  `sharesOutstanding` with `88,000,000`; the float source is persisted as
-  `hardcoded_float_override`.
-- The internal yfinance SQLite cache is stored in `data/yfinance_cache` so the
-  application remains usable when the Windows user cache is not writable.
-- An ACWI match does not require a yfinance price or float count. A missing or
-  invalid yfinance value only excludes a security that requires fallback.
-- A fallback float inconsistent with shares outstanding or total market
-  capitalization is excluded without substitution.
-- The legacy all-yfinance method remains the global fallback if the ACWI
-  download cannot be validated, but every fallback observation passes the same
-  float/share-count and float-cap/market-cap consistency checks.
-- `coverage_ratio` measures the published weight represented before exclusions.
-  Covered published weights are then normalized to 100% so both distributions
-  are compared over the same investable set.
-- `complete` means coverage is at least `NDX_COVERAGE_THRESHOLD` (99% by
-  default); lower coverage is reported as `partial_coverage`. An all-yfinance
-  reference is explicitly reported as `degraded_fallback` or
-  `degraded_partial_coverage`, regardless of its nominal coverage.
-
-The ETF holdings remain proxies for the index, and free market-data sources are
-not official or guaranteed. Local history starts with the first saved snapshot.
-
-## NDX vs S&P 500 Active Share
-
-The second dashboard panel compares the selected Nasdaq-100 ETF with the
-matching iShares S&P 500 ETF:
+The Active Share panel compares the selected Nasdaq-100 proxy with the matching
+iShares S&P 500 proxy:
 
 | Universe | Nasdaq-100 proxy | S&P 500 proxy |
 | --- | --- | --- |
-| Non-UCITS | IQQ | IVV |
-| UCITS | CNDX | CSPX |
+| Non-UCITS | IQQ, with QQQ fallback | IVV |
+| UCITS | CNDX, with EQQQ fallback | CSPX |
 
-Each pair is normalized independently over its published equity holdings. The
-calculation then uses the full union of securities in both funds, assigning
-zero to a security that is absent from one side:
+The calculation uses the complete union of securities in both normalized
+portfolios:
 
 ```text
-active_share = 50 x sum(abs(NDX_weight - SPX_weight))
+active_share = 50 x sum(abs(NDX_weight_i - SPX_weight_i))
 ```
-
-An Active Share of 46.7% means that 46.7% of either portfolio would need to be
-reallocated for the two normalized weight distributions to match. It measures
-weight and membership differences between the ETF proxies; it is not a return,
-tracking-error, or performance forecast.
 
 The panel includes:
 
-- the ten largest NDX overweights and ten largest S&P 500 overweights;
-- a Top-X slider that compares the aggregate weight of the largest NDX names in
-  both portfolios;
-- an overlaid constituent breakdown for that selected Top-X set;
-- three synthetic portfolios built from the full holdings union: the positive
-  NDX differences, the positive S&P 500 differences, and their shared overlap,
-  each independently renormalized to 100%;
-- an annual-reconstitution toggle that replaces current NDX weights with the
-  same public-data annual simulation used by the distortion panel, while the
-  S&P 500 reference remains unchanged.
+- the ten largest NDX overweights and S&P 500 overweights;
+- a Top-X concentration comparison;
+- a security-level overlay of NDX and S&P 500 weights;
+- synthetic 100% portfolios for NDX-only active weight, S&P-only active weight,
+  and portfolio overlap;
+- expandable holding tables;
+- an optional annual-reconstitution scenario for the NDX side.
+
+Active Share measures composition and weight differences. It is not a return,
+tracking-error, risk, or performance forecast.
+
+### Annual Reconstitution
+
+The annual panel exposes the intermediate stages of the public-data Nasdaq-100
+simulation rather than showing only its final weights.
+
+It visualizes:
+
+- selected-company modified market capitalizations;
+- the 3x free-float ceiling;
+- company and security concentration thresholds;
+- the company cohort above 4.5% and its cumulative weight;
+- weight transferred by company and security capping;
+- the largest donors and recipients;
+- rank preservation at each capping stage;
+- current versus simulated weights;
+- simulated index additions and removals.
+
+An audit section exposes the reconstructed values and residuals behind the
+charts.
+
+## Data model and universes
+
+Two regulatory universes are calculated and stored independently:
+
+- `non_ucits`
+- `ucits`
+
+They are never merged or averaged. Each distortion snapshot is also stored
+under one capitalization basis:
+
+- `float`
+- `total`
+
+Switching a dashboard control selects another persisted snapshot. It does not
+reinterpret or mix data from a different universe or basis.
+
+Published ETF holdings are always used as reported by the selected fund. The
+application removes cash and explicit non-equity positions, consolidates
+duplicate rows by ticker, and normalizes the remaining positive equity weights
+to 100%. GOOG and GOOGL remain separate securities.
+
+## Live distortion methodology
+
+### Free-float reference
+
+The primary free-float reference is the official iShares ACWI holdings file.
+The application uses each matched holding's market value, not its rounded
+displayed weight:
 
 ```text
-NDX_active_holding = max(NDX_weight - SPX_weight, 0) / active_share
-SPX_active_holding = max(SPX_weight - NDX_weight, 0) / active_share
-overlap_holding = min(NDX_weight, SPX_weight) / (1 - active_share)
+reference_mass_i = ACWI_holding_market_value_i
+float_weight_i = reference_mass_i / sum(reference_mass)
 ```
 
-Each elongated synthetic chart shows its 25 largest holdings. The remaining
-`Other` weight is reported below the chart instead of being drawn as a bar. An
-expandable table below each chart exposes its 50 largest holdings with rank,
-company name, normalized weight, and cumulative weight.
+Matching uses ticker and company-name checks to avoid collisions between
+unrelated listings with the same symbol.
 
-Official iShares holdings downloads are the primary S&P 500 sources. Optional
-local files can be configured with `NON_UCITS_SPX_HOLDINGS_CSV` and
-`UCITS_SPX_HOLDINGS_CSV`.
+ADR/ADS securities deliberately bypass direct ACWI matching because ACWI may
+hold the issuer's primary listing rather than the US depositary receipt.
+Current defaults are `ARM`, `ASML`, and `PDD`; `NDX_ADR_TICKERS` can extend the
+list.
 
-## If rebalanced today
+For an ADR or a security absent from ACWI, Yahoo Finance free-float
+capitalization is converted into the same ACWI fund-value scale:
 
-Each live snapshot also calculates an `NDX_WDI` using the weights that the
-Nasdaq-100 would receive if its full annual December reconstitution used the
-snapshot date's prices and public inputs.
-The implementation follows the
-[Nasdaq-100 methodology effective May 1, 2026](https://indexes.nasdaqomx.com/docs/Methodology_NDX.pdf)
-and the official
-[Nasdaq index weight calculation rules](https://indexes.nasdaqomx.com/docs/Nasdaq_Index_Weight_Calculations.pdf).
+```text
+fallback_scale =
+    median(ACWI_market_value / yfinance_float_market_cap)
 
-The daily pipeline:
+fallback_reference_mass =
+    yfinance_float_market_cap x fallback_scale
+```
 
-1. Builds the eligible universe from the official Nasdaq stock screener and
-   Nasdaq Trader symbol directory.
-2. Groups multiple share classes at company level with SEC CIK identifiers.
-3. Applies Nasdaq listing tier, non-financial, security-type, three-month ADVT,
-   seasoning, and the annual top-75/100/125 constituent-selection sequence.
-   Non-constituent ADRs are excluded unless primary-listing and listed
-   depositary-share inputs can be verified. Current membership is a conservative
-   public proxy for the prior-top-100 and post-reconstitution-addition flags.
-4. Recalculates every security's initial weight from modified capitalization:
+ACWI matches and calibrated fallbacks are combined first and then normalized
+together to 100%. Fallback observations are never normalized as a separate
+portfolio.
 
-   ```text
-   acwi_conversion_scale =
-       90th percentile(ACWI_float_mass / listed_total_cap)
+The Nasdaq-listed ASML receipt has a maintained override of `88,000,000` for
+both floating and total listed receipts. This avoids using Yahoo Finance's
+consolidated issuer-level value and prevents the annual calculation from
+deriving an unsupported 3x float ratio for the ADR.
 
-   converted_total_mass = listed_total_cap x acwi_conversion_scale
-   modified_cap_mass = min(converted_total_mass, 3 x ACWI_float_mass)
-   ```
+### Total-capitalization reference
 
-   The upper-quantile calibration estimates the common fund-value scale from
-   ACWI names whose free float is close to 100%. Direct ACWI matches never use
-   yfinance `floatShares`. For ADR/ADS securities or absent ACWI positions,
-   yfinance free float remains a documented fallback, except for the maintained
-   `ASML` ADR override of `88,000,000` floating receipts.
-5. Aggregates securities by company and iterates the annual company constraints:
-   a company above 24% is reduced to at most 20%; if companies above 4.5%
-   aggregate to at least 48%, that cohort is reduced to 40%. Initial rank is
-   preserved.
-6. Returns to security weights and iterates the annual security constraints:
-   a security above 15% is reduced to at most 14%; if the five largest
-   securities aggregate to at least 40%, they are reduced to 38.5% and every
-   security outside the top five is capped at the lower of 4.4% or the
-   fifth-largest weight.
-7. Converts the final weights into the proportional Index Shares represented by
-   the simulation.
-8. Compares the resulting security weights with the selected free-float or
-   total-cap reference and recalculates `NDX_WDI`.
+The total mode uses listed shares outstanding:
 
-The dashboard displays this score beside the live reading. Enabling **Show
-annual-reconstitution weights** switches the constituent rankings and main
-difference chart to simulated weights, adds signed changes versus current
-weights, and shows dedicated charts for the largest weight movements and
-simulated index entries/exits.
+```text
+total_market_cap_i = price_i x shares_outstanding_i
+total_weight_i = total_market_cap_i / sum(total_market_cap)
+```
 
-The weight constraints are deterministic, but the composition result is a
-public-data simulation rather than an official Nasdaq review. Nasdaq retains
-discretion and does not publish every review input. The snapshot records
-`rebalance_status`, source, coverage, additions, removals, fallbacks, and notes
-so this limitation remains visible through SQLite and the API.
+This is an analytical comparison scenario, not a claim that Nasdaq uses a
+simple uncapped total-market-cap methodology.
 
-### Annual reconstitution dashboard
+### Coverage and validation
 
-The dedicated **Annual Reconstitution** panel reconstructs every weighting
-stage from the persisted live snapshot and makes the annual rules auditable:
+The score is calculated over securities with a valid reference. Published and
+counterfactual weights are each renormalized over that same covered set.
 
-- observed company and security concentrations, their distance to each trigger,
-  and the corresponding Nasdaq target;
-- a ranked company-level view of the 4.5% cohort, including its cumulative
-  weight against the 48% trigger and 40% adjustment target;
-- cumulative selected-company Modified Market Capitalization before and after
-  company capping;
-- the Modified Market Capitalization multiple relative to the ACWI free-float
-  input, including the `3x` ceiling;
-- company-stage, security-stage, and total redistributed weight;
-- cumulative transfers by initial rank, the largest donors and recipients, and
-  rank preservation measured separately at each official capping stage;
-- current versus simulated annual weights, plus simulated index entries and
-  exits.
+`coverage_ratio` reports the original published ETF weight represented before
+renormalization. With the default `NDX_COVERAGE_THRESHOLD=0.99`:
 
-An audit expander exposes the reconstructed stage values and residuals. The
-snapshot does not persist unselected candidates ranked 101-125, so the panel
-does not infer or display a fictitious distance to those selection cutoffs. It
-shows the selected 100-company distribution and the simulated membership
-changes instead.
+- `complete` means at least 99% coverage;
+- `partial_coverage` means coverage is below the threshold;
+- `degraded_fallback` and `degraded_partial_coverage` identify an all-Yahoo
+  fallback when ACWI cannot be validated.
 
-## Capitalization references
+Invalid float observations are excluded rather than silently repaired. The
+quality checks reject impossible or inconsistent combinations of price, float
+shares, total shares, and market capitalization.
 
-The two dashboard bases are analytical comparison scenarios:
+## Annual reconstitution simulation
 
-- **Free Float** uses shares readily available for public trading. This is the
-  convention used by major investable benchmarks such as the
-  [S&P 500](https://www.spglobal.com/spdji/en/methodology/article/sp-us-indices-methodology/)
-  and the
-  [MSCI World](https://www.msci.com/indexes/index/990100/msci-world-index).
-- **Total** uses all shares outstanding, including strategic holdings that may
-  not be readily tradable. The
-  [Nasdaq Composite](https://www.nasdaq.com/newsroom/nasdaq-composite-vs-nasdaq-100-what-investors-should-know)
-  is a useful reference for this approach.
+Every live snapshot can simulate a full annual December reconstitution using
+the snapshot date's public inputs. This is not an accelerated or forced
+rebalancing scenario: it asks what the annual process would produce if today's
+data were the annual reference data.
 
-The live free-float and total views remain analytical reference scenarios. The
-separate **If rebalanced today** calculation applies Nasdaq's modified
-capitalization and concentration rules before comparing those simulated index
-weights with the selected reference.
+The implementation follows the public Nasdaq-100 methodology and index weight
+calculation rules:
 
-## Holdings sources and fallbacks
+- [Nasdaq-100 Index methodology](https://indexes.nasdaqomx.com/docs/Methodology_NDX.pdf)
+- [Nasdaq index weight calculations](https://indexes.nasdaqomx.com/docs/Nasdaq_Index_Weight_Calculations.pdf)
 
-Every source must contain between 90 and 130 equities, unique tickers, and valid
-published weights. Top-10 pages, HTML responses, and incomplete exports are
-rejected.
+The pipeline:
 
-`non_ucits` source order:
+1. Builds a public eligible universe from Nasdaq sources.
+2. Applies listing, issuer, security-type, seasoning, and liquidity filters.
+3. Groups multiple security classes at company level, using SEC CIK identifiers
+   when available.
+4. Applies the annual top-75/100/125 constituent-selection sequence.
+5. Recalculates initial security weights from modified market capitalization.
+6. Applies company-level concentration rules while preserving initial rank.
+7. Returns to security level and applies security-level concentration rules.
+8. Converts final weights into proportional simulated Index Shares.
+9. Recalculates distortion and Active Share with the simulated NDX weights.
 
-1. Explicit local CSV (`NON_UCITS_HOLDINGS_CSV` or `--holdings-csv`)
-2. Official BlackRock/iShares IQQ download
-3. Public Invesco QQQ holdings
-4. CSV URLs configured in `NON_UCITS_FALLBACK_URLS`
+For direct ACWI matches, modified market capitalization uses ACWI free-float
+mass rather than Yahoo Finance `floatShares`:
 
-`ucits` source order:
+```text
+acwi_conversion_scale =
+    90th percentile(ACWI_float_mass / listed_total_cap)
 
-1. Explicit local CSV (`UCITS_HOLDINGS_CSV` or `--holdings-csv`)
-2. Official iShares CNDX CSV
-3. Public Invesco EQQQ holdings
-4. CSV URLs configured in `UCITS_FALLBACK_URLS`, including optional Xtrackers
-   or UBS sources
+converted_total_mass = listed_total_cap x acwi_conversion_scale
+modified_cap_mass = min(converted_total_mass, 3 x ACWI_float_mass)
+```
 
-The observed public Nasdaq page exposes only leading holdings and is not accepted
-as a complete universe. Each snapshot retains the selected `reference_fund`,
-published holdings date, and failures from preceding sources.
+The annual capping engine implements these public constraints:
 
-For the free-float calculation, the official ACWI download is then used as the
-primary reference. Matching is one Nasdaq-100 ticker at a time and requires a
-compatible company name. The resulting ACWI market values, plus any calibrated
-yfinance fallback values, are renormalized to 100% across the covered
-Nasdaq-100 selection.
+- a company above 24% is adjusted to at most 20%;
+- if companies above 4.5% represent at least 48%, that cohort is reduced to
+  40%;
+- a security above 15% is adjusted to at most 14%;
+- if the five largest securities represent at least 40%, they are reduced to
+  38.5%;
+- securities outside that top five are then capped at the lower of 4.4% or the
+  fifth-largest security weight.
 
-## Quarterly SEC history
+The constraints are iterated until satisfied. Company-stage and security-stage
+rank preservation are measured independently.
 
-The dashboard's long-term chart is not built from local refresh snapshots. It
-contains exactly one observation per public quarter from the first available
-Form N-PORT data in September 2019.
+Nasdaq does not publish every review input and retains methodological
+discretion. The resulting composition is therefore a transparent public-data
+simulation, not a forecast of an official review. When a fresh public universe
+is unavailable, the foreground calculation uses a compatible cached selection
+or current constituents while a background worker attempts to refresh the
+selection.
 
-For each quarter:
+## Quarterly history
 
-1. The QQQ and SPGM N-PORT-P accessions are discovered in SEC EDGAR.
-2. Equity positions are matched by exact CUSIP, not ticker or company name.
-3. Missing ADRs and incompatible listing forms are excluded from both
-   distributions.
-4. For each other QQQ security absent from SPGM, its counterfactual weight is
-   estimated from the median observed ratio among matched QQQ overweights:
-   `estimated_SPGM_weight = QQQ_weight / median_overweight_ratio`.
-5. Observed and estimated SPGM weights are combined, then QQQ and SPGM are each
-   independently renormalized to 100%.
-6. `NDX_WDI = 50 x sum(abs(QQQ_weight - SPGM_weight))`.
+The long-term WDI chart does not use frequent local refresh snapshots. It uses
+one observation per public quarter, beginning in September 2019.
 
-This historical method is deliberately separate from the live ACWI method. SPGM
-did not hold every QQQ security in the early years: September 2019 matches 53 of
-103 QQQ equity CUSIPs and covers about 85% of the comparable QQQ equity weight.
-The matched-only score is retained as `ndx_wdi_raw`, while `ndx_wdi` contains
-the corrected series used by the chart.
+The historical methodology is separate from the live ACWI methodology:
 
-The correction was selected through historical masking tests rather than from a
-single current snapshot. Rank-based missingness patterns observed from 2019
-through 2021 were applied to the better-covered 2022-2026 quarters. Across 170
-tests at 86.5% average coverage, median-ratio imputation reduced mean absolute
-error from 2.40 to 0.65 NDX_WDI points (72.7%) and improved the result in 169
-tests. The raw score, correction size, estimated count, and non-comparable
-exclusion count remain available for audit.
+1. Discover QQQ and SPGM Form N-PORT-P filings in SEC EDGAR.
+2. Download and archive the complete filing XML.
+3. Match equity positions by exact CUSIP.
+4. Exclude missing ADRs and incompatible listing forms from both sides.
+5. Estimate other missing SPGM positions with the median observed overweight
+   ratio for that quarter.
+6. Normalize QQQ and the reconstructed SPGM comparison to 100%.
+7. Calculate raw and corrected quarterly WDI values.
 
-Rebuild the complete history with:
+The correction was selected through historical masking tests. The raw matched
+score, estimated positions, exclusions, correction size, and constituent-level
+contributions remain available for audit.
 
-```powershell
+Rebuild the complete local archive with:
+
+```bash
 python run_quarterly_history.py
 ```
 
-The command stores all 54 complete filing XML documents under
-`data/sec_nport_filings/raw/{qqq|spgm}/{report_date}/{accession}/`, plus:
+Generated files include:
 
-- `manifest.csv`: accession, official SEC URL, local path, transport, file size,
-  and SHA-256 checksum.
-- `positions.csv.gz`: every normalized equity position from both funds.
-- `constituent_history.csv.gz`: raw and corrected quarterly weights, weight gap,
-  contribution, estimation status, and exclusion status for every QQQ CUSIP.
-- `data/edgar_quarterly_history.csv`: the compact 27-point dashboard series.
+```text
+data/
+  edgar_quarterly_history.csv
+  sec_nport_filings/
+    manifest.csv
+    positions.csv.gz
+    constituent_history.csv.gz
+    raw/
+      qqq/
+      spgm/
+```
 
-The full local filing archive is ignored by Git. Direct SEC archive downloads
-are attempted first. When SEC blocks the runtime's network address, the
-configured reader transport retrieves the complete XML document element from
-the same official SEC archive URL; the manifest records which transport was
-used.
+The filing archive is ignored by Git. SEC requests should set a descriptive
+`SEC_USER_AGENT`. A configured reader transport can retrieve the same official
+SEC document when direct archive access is blocked; the manifest records the
+transport, source URL, checksum, and local path.
+
+## Data sources and fallback order
+
+Each holdings source must contain a plausible complete equity portfolio:
+90-130 securities for Nasdaq-100 proxies, unique normalized tickers, and valid
+positive weights. HTML pages, top-holdings extracts, and incomplete exports are
+rejected.
+
+### Nasdaq-100 ETF holdings
+
+Non-UCITS:
+
+1. `NON_UCITS_HOLDINGS_CSV` or `--holdings-csv`
+2. official iShares IQQ download
+3. public Invesco QQQ download
+4. `NON_UCITS_FALLBACK_URLS`
+
+UCITS:
+
+1. `UCITS_HOLDINGS_CSV` or `--holdings-csv`
+2. official iShares CNDX download
+3. public Invesco EQQQ download
+4. `UCITS_FALLBACK_URLS`
+
+### S&P 500 ETF holdings
+
+- Non-UCITS: local override or official iShares IVV
+- UCITS: local override or official iShares CSPX
+
+### Other providers
+
+- ACWI: official BlackRock/iShares holdings download
+- prices and listed share data: Yahoo Finance through `yfinance`
+- public Nasdaq universe and liquidity: Nasdaq public endpoints and symbol
+  directory
+- issuer identity: SEC CIK data where available
+- quarterly history: SEC EDGAR Form N-PORT-P filings for QQQ and SPGM
+
+There is no synthetic snapshot fallback. A provider failure either uses a
+previously validated cached result, uses an explicitly documented degraded
+method, or fails visibly.
 
 ## Architecture
 
 ```text
-qqq_holdings_provider.py  # Nasdaq-100 and S&P 500 iShares provider chains
-acwi_weights_provider.py  # ACWI matching, ADR labels, calibrated fallbacks
-ndx_wdi/domain/           # pure engines; no network, database, or UI imports
-  active_share.py         # NDX/SPX union, normalization, and Active Share
-  distortion.py           # WDI calculation, coverage, and statuses
-  market_quality.py       # shared float-data validity rules
-  rebalance.py            # annual/quarterly selection and weighting rules
-  rebalance_analytics.py  # thresholds, transfers, and rank audit
-ndx_wdi/ui/runtime.py     # snapshot-scoped Streamlit data and analysis caches
-active_share.py           # backward-compatible domain imports
-distortion_engine.py      # backward-compatible domain imports
-rebalance_analytics.py    # backward-compatible domain imports
-nasdaq100_rebalance.py    # Nasdaq/Yahoo adapter + domain imports
-edgar_quarterly_history.py # N-PORT archive, CUSIP history, quarterly scores
-market_data_provider.py   # live market data through yfinance
-database.py               # SQLite schema and access
-observability.py          # refresh timings, cache status, structured events
-provider_cache.py         # persistent market data, selection, and job cache
-background_jobs.py        # deduplicated single-worker refresh queue
-snapshot_service.py       # live snapshot orchestration
-api.py                    # FastAPI application
-dashboard.py              # Streamlit dashboard
-run_snapshot.py           # one-off and scheduled CLI
-run_quarterly_history.py  # rebuild the SEC quarterly archive and chart data
-tests/                    # calculations, parsing, persistence, and API tests
+dashboard.py                 Streamlit application and panel composition
+api.py                       FastAPI read and recompute endpoints
+run_snapshot.py              one-off and scheduled snapshot CLI
+run_local.py                 detached local API/dashboard launcher
+run_quarterly_history.py     SEC history rebuild entry point
+
+snapshot_service.py          live orchestration and persistence boundary
+database.py                  SQLite snapshot and component repository
+provider_cache.py            persistent provider, market, selection, and job cache
+cached_providers.py          stale-while-revalidate provider wrappers
+background_jobs.py           deduplicated single-worker refresh queue
+observability.py             stage timings and cache-status events
+
+qqq_holdings_provider.py     Nasdaq-100 and S&P 500 holdings adapters
+acwi_weights_provider.py     ACWI matching and calibrated fallbacks
+market_data_provider.py      batched and cached yfinance adapter
+nasdaq100_rebalance.py       Nasdaq/Yahoo I/O adapter for reconstitution
+edgar_quarterly_history.py   SEC archive and quarterly reconstruction
+
+ndx_wdi/
+  domain/
+    active_share.py          pure Active Share calculations
+    distortion.py            pure WDI and coverage calculations
+    market_quality.py        shared market-data validation
+    rebalance.py             pure selection and capping rules
+    rebalance_analytics.py   threshold, transfer, and rank analysis
+  ui/
+    runtime.py               snapshot-scoped Streamlit caches
+
+dashboard_chart_data.py      deterministic chart-data transformations
+tests/                       unit, integration, persistence, API, and boundary tests
 ```
 
-The application imports `ndx_wdi.domain` directly. Root-level calculation
-modules remain as compatibility facades for existing scripts and tests.
-Providers expose small contracts, allowing a licensed or more reliable data
-feed to replace Invesco or yfinance without changing the calculation engines,
-API, or dashboard.
+Root-level `active_share.py`, `distortion_engine.py`, and
+`rebalance_analytics.py` remain compatibility facades. New application code
+imports the pure engines from `ndx_wdi.domain`.
 
-Each Streamlit analysis panel runs as an isolated fragment. Widget interactions
-inside a panel therefore do not rerun the page header, database selection, or
-the other panels. Immutable `snapshot_id` values key the component, Active
-Share, annual-analysis, and quarterly-history caches. A newly persisted
-snapshot naturally invalidates those views without clearing unrelated cached
-data.
+The domain package is deliberately prevented from importing network, database,
+or UI modules. This keeps the financial rules deterministic and testable while
+allowing providers or the frontend to be replaced independently.
+
+### Runtime data flow
+
+```mermaid
+flowchart LR
+    A["ETF, ACWI, Nasdaq, Yahoo and SEC providers"] --> B["Validated provider caches"]
+    B --> C["Snapshot orchestration"]
+    C --> D["Pure domain engines"]
+    D --> E["SQLite snapshots and components"]
+    E --> F["FastAPI"]
+    E --> G["Streamlit cached fragments"]
+    B --> H["Background Nasdaq refresh worker"]
+    H --> C
+```
+
+## Cache and refresh behavior
+
+The application uses two different cache layers:
+
+1. **Persistent provider cache** in `data/provider_cache.sqlite3`
+2. **Snapshot-scoped Streamlit cache** keyed by immutable `snapshot_id`
+
+Default provider lifetimes:
+
+| Data | Default TTL |
+| --- | ---: |
+| ETF and ACWI parsed holdings | 6 hours |
+| Current prices | 10 minutes |
+| Float shares, total shares, market cap | 24 hours |
+| Nasdaq public universe and liquidity | 24 hours |
+| Annual constituent selection | 24 hours |
+| Retry delay after failed fundamentals request | 60 seconds |
+
+Provider holdings use stale-while-revalidate behavior: a failed refresh retains
+the last complete validated portfolio. Cache keys include provider order and
+configured URLs, so configuration changes do not reuse incompatible data.
+Explicit local CSV inputs bypass the fund cache.
+
+Nasdaq universe and liquidity retrieval never blocks the main snapshot. The
+foreground uses a fresh or stale compatible selection when available, otherwise
+current constituents. A deduplicated single-worker queue refreshes the slow
+inputs and can persist a later updated snapshot.
+
+Each dashboard analysis panel is an isolated Streamlit fragment. Widget changes
+inside one panel do not rerun the header, reload unrelated panels, or create a
+new snapshot. Component tables, Active Share results, annual analysis, chart
+inputs, and quarterly history are cached by snapshot or source-file identity.
+
+Every completed refresh records:
+
+- `performance_status`
+- stage-level `timings_ms`
+- source-specific `cache_statuses`
+- structured completion or failure events
+
+`NDX_REFRESH_WARN_SECONDS` marks a completed refresh as `slow` without failing
+it.
 
 ## Installation
 
@@ -379,7 +448,7 @@ Python 3.11 or 3.12 is recommended.
 
 ```powershell
 python -m venv .venv
-.venv\Scripts\Activate.ps1
+.\.venv\Scripts\Activate.ps1
 python -m pip install --upgrade pip
 pip install -r requirements.txt
 pip install -r requirements-dev.txt
@@ -397,169 +466,168 @@ pip install -r requirements-dev.txt
 cp .env.example .env
 ```
 
-`requirements.txt` locks all direct and transitive versions for reproducible
-Python 3.11 and 3.12 installations. Direct dependency ranges are maintained in
-`requirements.in`. Regenerate the lock after changing those ranges or when
-preparing a controlled dependency update:
+`requirements.txt` is the reproducible lock file. Direct dependency ranges live
+in `requirements.in`.
 
-```bash
-uv pip compile requirements.in --universal --python-version 3.11 \
-  --upgrade -o requirements.txt
-python -m pytest
-```
+## Quick start
 
-## First run
-
-Create live snapshots, start the API, and then start the dashboard:
+Create the initial snapshots:
 
 ```bash
 python run_snapshot.py --universe all
-python -m uvicorn api:app --reload
 ```
 
-In a second terminal:
-
-```bash
-python -m streamlit run dashboard.py
-```
-
-- Interactive API: `http://127.0.0.1:8000/docs`
-- Dashboard: `http://localhost:8501`
-
-Both services can instead be launched as detached background processes with
-the active Python environment:
+Launch the API and dashboard:
 
 ```bash
 python run_local.py
 ```
 
-The launcher returns immediately, prints the process IDs, and skips services
-whose ports are already listening. It uses detached Windows processes or a new
-POSIX session as appropriate. Runtime output is written under `data/`.
+`run_local.py` returns immediately, skips a service whose port is already in
+use, and writes process output under `data/`.
 
-The dashboard header selects either `NDX Distortion Index` or
-`NDX vs S&P 500`. Both panels provide a matching universe control:
+- Dashboard: `http://127.0.0.1:8501`
+- API documentation: `http://127.0.0.1:8000/docs`
 
-- `Non-UCITS` or `UCITS`
-
-The distortion panel also provides `Free Float` or `Total`. Active Share uses
-published ETF weights and therefore does not expose that counterfactual basis
-control.
-
-The Refresh button updates the selected universe and capitalization basis using
-live data only.
-
-## Refresh observability
-
-Every successful refresh persists its stage timings and observable cache status
-with the snapshot. The same fields are returned by `POST /api/recompute`,
-`GET /api/current`, and the snapshot CLI:
-
-- `performance_status`: `within_budget` or `slow`
-- `timings_ms`: database initialization, holdings, universe selection, market
-  data, reference data, calculations, and persistence
-- `cache_statuses`: separate outcomes for NDX fund holdings, ACWI, S&P 500 fund
-  holdings, yfinance market data, and Nasdaq annual selection
-
-`NDX_REFRESH_WARN_SECONDS` controls the non-failing slow-refresh threshold and
-defaults to 180 seconds. Completed and failed refreshes also emit structured JSON
-events through Python logging, making the current local logs usable by a future
-metrics collector without changing the pipeline again.
-
-Provider data uses stale-while-revalidate behavior:
-
-- parsed IQQ/CNDX/QQQ/EQQQ, ACWI, IVV, and CSPX portfolios are cached for six
-  hours; a source failure retains the last valid complete portfolio
-- current prices are cached for 10 minutes and refreshed in one yfinance batch
-- float shares, total shares, and market capitalization are cached for 24 hours
-- Nasdaq public-universe, liquidity, and annual-selection results are cached for
-  24 hours
-- failed fundamental requests retain stale values and back off for 60 seconds
-
-The foreground snapshot never waits for a Nasdaq eligibility refresh. It uses a
-fresh or stale compatible annual selection when available, otherwise it uses the
-current constituents. A single background worker refreshes the public universe
-and liquidity, persists the new selection, and creates an updated snapshot. The
-dashboard polls the durable job status and reloads automatically when that
-snapshot is ready.
-
-Provider cache keys include the configured provider chain and source URLs, so a
-URL or provider-order change does not reuse an incompatible portfolio. Explicit
-local CSV inputs bypass the fund cache and are read on every refresh.
-
-## Live-source usage
+To run the services interactively:
 
 ```bash
-# Both universes; fails explicitly if no provider chain succeeds
+python -m uvicorn api:app --host 127.0.0.1 --port 8000
+python -m streamlit run dashboard.py --server.address 127.0.0.1 --server.port 8501
+```
+
+Run those commands in separate terminals.
+
+## Snapshot commands
+
+```bash
+# Both universes, free-float reference
 python run_snapshot.py --universe all
 
-# Both universes using price x shares outstanding
+# Both universes, total-capitalization reference
 python run_snapshot.py --universe all --basis total
 
-# Attach an explicit local holdings CSV to one universe
-python run_snapshot.py --universe non_ucits --holdings-csv path/holdings_qqq.csv
-python run_snapshot.py --universe ucits --holdings-csv path/holdings_cndx.csv
-```
+# One universe with an explicit local holdings file
+python run_snapshot.py --universe non_ucits --holdings-csv path/holdings.csv
 
-All URLs are configurable through `.env`. A compatible CSV must contain at least
-a ticker and weight, and should ideally include company name and asset class.
-There is no fallback to synthetic data.
-
-## API
-
-```text
-GET  /api/current
-GET  /api/current?universe=ucits
-GET  /api/current?universe=ucits&weighting_basis=total
-GET  /api/history?limit=365&universe=non_ucits
-GET  /api/components?universe=ucits&weighting_basis=total&ranking=contributors&limit=20
-GET  /api/active-share?universe=non_ucits&ranking=contributors&limit=20
-GET  /api/active-share?universe=ucits&rebalanced=true
-POST /api/recompute
-```
-
-Example recomputation:
-
-```bash
-curl -X POST http://127.0.0.1:8000/api/recompute \
-  -H "Content-Type: application/json" \
-  -d '{"universe":"all","weighting_basis":"total"}'
-```
-
-For `/api/components`, `ranking` accepts `all`, `overweights`,
-`underweights`, or `contributors`. For `/api/active-share`, it accepts `all`,
-`ndx_overweights`, `spx_overweights`, or `contributors`.
-
-## Daily snapshots
-
-The built-in loop waits until the selected local time and remains active:
-
-```bash
+# Built-in daily loop at local time
 python run_snapshot.py --universe all --daily --at 18:00
 ```
 
-In production, prefer a system scheduler for the one-off command:
+For unattended production use, prefer Task Scheduler, cron, or another service
+manager around the one-off command.
 
-```cron
-0 18 * * 1-5 cd /path/to/ndx-wdi && .venv/bin/python run_snapshot.py --universe all
+## Configuration
+
+Copy `.env.example` to `.env`. The example file documents every supported
+provider URL, local override, cache path, timeout, TTL, and SEC option.
+
+The most important settings are:
+
+| Variable | Purpose |
+| --- | --- |
+| `NDX_DB_PATH` | Snapshot SQLite database |
+| `NDX_PROVIDER_CACHE_PATH` | Persistent provider cache |
+| `NDX_COVERAGE_THRESHOLD` | Minimum complete-snapshot coverage |
+| `NDX_REFRESH_WARN_SECONDS` | Slow-refresh warning threshold |
+| `NDX_BACKGROUND_REFRESH_ENABLED` | Enable background Nasdaq refresh |
+| `NDX_ADR_TICKERS` | Additional ADR/ADS symbols |
+| `NON_UCITS_HOLDINGS_CSV` | Local Non-UCITS Nasdaq-100 holdings |
+| `UCITS_HOLDINGS_CSV` | Local UCITS Nasdaq-100 holdings |
+| `NON_UCITS_SPX_HOLDINGS_CSV` | Local Non-UCITS S&P 500 holdings |
+| `UCITS_SPX_HOLDINGS_CSV` | Local UCITS S&P 500 holdings |
+| `YFINANCE_PRICE_TTL_SECONDS` | Price cache lifetime |
+| `YFINANCE_FUNDAMENTALS_TTL_SECONDS` | Share-data cache lifetime |
+| `PROVIDER_HOLDINGS_TTL_SECONDS` | Parsed fund holdings lifetime |
+| `NASDAQ_SELECTION_TTL_SECONDS` | Annual selection lifetime |
+| `SEC_USER_AGENT` | SEC-compliant application identity |
+
+## API
+
+| Method | Route | Purpose |
+| --- | --- | --- |
+| `GET` | `/api/current` | Latest snapshot by universe and basis |
+| `GET` | `/api/history` | Persisted local snapshot history |
+| `GET` | `/api/components` | Constituent-level WDI data |
+| `GET` | `/api/active-share` | Active Share summary and components |
+| `POST` | `/api/recompute` | Run and persist a live recomputation |
+
+Examples:
+
+```bash
+curl "http://127.0.0.1:8000/api/current?universe=non_ucits&weighting_basis=float"
+
+curl "http://127.0.0.1:8000/api/components?universe=ucits&ranking=contributors&limit=20"
+
+curl "http://127.0.0.1:8000/api/active-share?universe=non_ucits&rebalanced=true"
+
+curl -X POST "http://127.0.0.1:8000/api/recompute" \
+  -H "Content-Type: application/json" \
+  -d '{"universe":"all","weighting_basis":"float"}'
 ```
 
-On Windows, create a Task Scheduler entry that runs
-`C:\path\.venv\Scripts\python.exe` with the arguments
-`run_snapshot.py --universe all` and uses the project directory as its working
-directory.
+Component rankings:
 
-## Tests
+- WDI: `all`, `overweights`, `underweights`, `contributors`
+- Active Share: `all`, `ndx_overweights`, `spx_overweights`, `contributors`
+
+## Persistence
+
+The main SQLite database stores:
+
+- snapshot summary, status, basis, universe, sources, and dates;
+- WDI component weights and contributions;
+- annual simulated weights, membership, changes, and input status;
+- Active Share summaries and security-level comparisons;
+- refresh timings and cache statuses.
+
+The provider-cache SQLite database stores:
+
+- batched market data;
+- parsed holdings frames;
+- annual Nasdaq selections;
+- durable background-refresh job state.
+
+Local snapshot history begins when the first snapshot is saved. It is distinct
+from the SEC quarterly history used by the long-term chart.
+
+## Development and validation
 
 ```bash
 python -m ruff check .
 python -m pytest
 ```
 
-The reference fixture in `tests/fixtures/reference_snapshot.json` compares
-published weights `A=50%`, `B=30%`, and `C=20%`
-with capitalization weights `60%`, `25%`, and `15%`, producing `NDX_WDI = 10`.
-The suite also covers normalization, missing price/share data, distribution sums,
-component contributions, refresh instrumentation, SQLite persistence, provider
-validation, and all API routes. GitHub Actions runs Ruff, compilation, and the
-full test suite on Python 3.11 and 3.12 for every pull request.
+The test suite covers:
+
+- normalization and WDI arithmetic;
+- Active Share and synthetic sleeves;
+- market-data quality rules;
+- annual selection, capping, transfers, and rank preservation;
+- ETF and ACWI parsing and validation;
+- persistent caches and background jobs;
+- SQLite migrations and persistence;
+- API routes and recomputation;
+- Streamlit runtime cache behavior;
+- SEC filing parsing and quarterly reconstruction;
+- architectural boundaries between domain and infrastructure.
+
+GitHub Actions runs Ruff, compilation, and the full suite on Python 3.11 and
+3.12 for every pull request.
+
+## Known limitations
+
+- ETF holdings are investable proxies for index weights, not official Nasdaq
+  constituent files.
+- Free public market-data fields can be delayed, incomplete, or inconsistent.
+- ACWI can represent a primary listing rather than the Nasdaq-listed receipt.
+- The annual composition simulation lacks non-public Nasdaq review flags and
+  discretionary decisions.
+- Current membership is used conservatively when a compatible annual-selection
+  cache is unavailable.
+- Historical SPGM coverage is incomplete in early quarters and requires the
+  documented correction method.
+- Local live history only exists from the first successful saved snapshot.
+
+These limitations are retained in snapshot statuses, source fields, component
+statuses, rebalance notes, and audit tables rather than hidden from the UI.
