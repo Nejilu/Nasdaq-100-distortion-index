@@ -13,10 +13,8 @@ import numpy as np
 import pandas as pd
 import requests
 
-from market_data_provider import (
-    FLOAT_SHARES_OVERRIDE_STATUS,
-    evaluate_float_observations,
-)
+from market_data_provider import FLOAT_SHARES_OVERRIDE_STATUS
+from ndx_wdi.domain.market_quality import evaluate_float_observations
 
 
 DEFAULT_ACWI_URL = (

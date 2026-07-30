@@ -17,6 +17,7 @@ from market_data_provider import (
     _allocate_shared_float_shares,
     _normalize_market_data,
 )
+from provider_cache import ProviderCache
 
 
 def test_expected_ndx_wdi_is_10_and_contributions_reconcile():
@@ -339,6 +340,144 @@ def test_yfinance_market_data_batch_has_a_global_deadline(monkeypatch):
     assert elapsed < 0.08
     assert result.loc[0, "ticker"] == "SLOW"
     assert "deadline exceeded" in result.loc[0, "market_data_error"]
+
+
+def test_persistent_market_cache_avoids_network_when_fresh(
+    tmp_path,
+    monkeypatch,
+):
+    cache_path = tmp_path / "providers.sqlite3"
+    now = time.time()
+    ProviderCache(cache_path).upsert_market_data(
+        pd.DataFrame(
+            {
+                "ticker": ["A"],
+                "price": [10.0],
+                "float_shares": [90.0],
+                "shares_outstanding": [100.0],
+                "market_cap": [1_000.0],
+                "float_shares_status": ["reported"],
+                "shares_outstanding_status": ["reported"],
+                "market_data_error": [None],
+                "price_fetched_at": [now],
+                "fundamentals_fetched_at": [now],
+                "fundamentals_attempted_at": [now],
+            }
+        )
+    )
+    provider = YFinanceMarketDataProvider(
+        persistent_cache_path=cache_path,
+    )
+    monkeypatch.setattr(provider, "_configure_cache", lambda: None)
+    monkeypatch.setattr(
+        provider,
+        "_fetch_many",
+        lambda _tickers: (_ for _ in ()).throw(
+            AssertionError("fundamentals network call was not expected")
+        ),
+    )
+    monkeypatch.setattr(
+        provider,
+        "_fetch_prices",
+        lambda _tickers: (_ for _ in ()).throw(
+            AssertionError("price network call was not expected")
+        ),
+    )
+
+    result = provider.get_market_data(["A"]).set_index("ticker")
+
+    assert result.loc["A", "price"] == 10.0
+    assert result.loc["A", "float_shares"] == 90.0
+    assert provider.cache_status == "fresh_hit:1/1"
+
+
+def test_stale_price_uses_bulk_download_without_refetching_fundamentals(
+    tmp_path,
+    monkeypatch,
+):
+    cache_path = tmp_path / "providers.sqlite3"
+    now = time.time()
+    ProviderCache(cache_path).upsert_market_data(
+        pd.DataFrame(
+            {
+                "ticker": ["A"],
+                "price": [10.0],
+                "float_shares": [90.0],
+                "shares_outstanding": [100.0],
+                "market_cap": [1_000.0],
+                "float_shares_status": ["reported"],
+                "shares_outstanding_status": ["reported"],
+                "market_data_error": [None],
+                "price_fetched_at": [now - 1_000],
+                "fundamentals_fetched_at": [now],
+                "fundamentals_attempted_at": [now],
+            }
+        )
+    )
+    provider = YFinanceMarketDataProvider(
+        persistent_cache_path=cache_path,
+    )
+    monkeypatch.setattr(provider, "_configure_cache", lambda: None)
+    monkeypatch.setattr(provider, "_fetch_many", lambda tickers: [])
+    monkeypatch.setattr(
+        provider,
+        "_fetch_prices",
+        lambda tickers: {"A": 11.5},
+    )
+
+    result = provider.get_market_data(["A"]).set_index("ticker")
+
+    assert result.loc["A", "price"] == 11.5
+    assert result.loc["A", "shares_outstanding"] == 100.0
+
+
+def test_failed_fundamental_refresh_keeps_stale_values_and_backs_off(
+    tmp_path,
+    monkeypatch,
+):
+    cache_path = tmp_path / "providers.sqlite3"
+    now = time.time()
+    ProviderCache(cache_path).upsert_market_data(
+        pd.DataFrame(
+            {
+                "ticker": ["A"],
+                "price": [10.0],
+                "float_shares": [90.0],
+                "shares_outstanding": [100.0],
+                "market_cap": [1_000.0],
+                "float_shares_status": ["reported"],
+                "shares_outstanding_status": ["reported"],
+                "market_data_error": [None],
+                "price_fetched_at": [now],
+                "fundamentals_fetched_at": [now - 90_000],
+                "fundamentals_attempted_at": [now - 90_000],
+            }
+        )
+    )
+    provider = YFinanceMarketDataProvider(
+        persistent_cache_path=cache_path,
+        failure_retry_seconds=600,
+    )
+    monkeypatch.setattr(provider, "_configure_cache", lambda: None)
+    calls = []
+    monkeypatch.setattr(
+        provider,
+        "_fetch_many",
+        lambda tickers: calls.append(list(tickers))
+        or [
+            {
+                "ticker": "A",
+                "market_data_error": "temporary failure",
+            }
+        ],
+    )
+
+    first = provider.get_market_data(["A"]).set_index("ticker")
+    second = provider.get_market_data(["A"]).set_index("ticker")
+
+    assert first.loc["A", "float_shares"] == 90.0
+    assert second.loc["A", "shares_outstanding"] == 100.0
+    assert calls == [["A"]]
 
 
 def test_invalid_direct_fallback_status_is_excluded_even_with_positive_weight():
